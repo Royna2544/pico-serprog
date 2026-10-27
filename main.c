@@ -72,19 +72,35 @@ static void wlantalk_putc_func(void *privdata, int c) {
 
 static void wlan_talk_loop(struct device *wlan_dev) {
   struct wlan_talk_message msg;
-  make_wlan_talk_message(wlantalk_putc_func, wlan_dev, "SLAVE", "pico-serprog");
-  while (1) {
-    if (parse_wlan_talk_message(wlantalk_getc_func, wlan_dev, &msg) < 0) {
-      pr_err("Failed to parse WLAN talk message");
-      continue;
-    }
-    pr_info("Parsed WLAN talk message: command='%s', data='%s'", msg.command,
-            msg.data);
+#define send(command, data)                                                    \
+  make_wlan_talk_message(wlantalk_putc_func, wlan_dev, command, data)
+#define is(s) (!strcmp(msg.command, s))
+#define get() parse_wlan_talk_message(wlantalk_getc_func, wlan_dev, &msg)
+#define send_get(command, data)                                                \
+  send(command, data);                                                         \
+  if (get() < 0) {                                                             \
+    pr_err("Failed to parse WLAN talk message");                               \
+    return;                                                                    \
+  }
+
+  send_get("SLAVE", "pico-serprog");
+  pr_info("Slave device is %s", msg.data);
+  send_get("ADDR", "");
+  pr_info("Slave device MAC: %s", msg.data);
+  send_get("SCAN", "");
+  pr_info("Slave device scan results: %s", msg.data);
+  send_get("CONN?", "");
+  pr_info("Slave device connection status: %s", msg.data);
+
+  while (0) {
     if (make_wlan_talk_message(wlantalk_putc_func, wlan_dev, msg.command,
                                msg.data) < 0) {
       pr_err("Failed to make WLAN talk message");
     }
   }
+#undef send
+#undef is
+#undef get
 }
 
 int main() {

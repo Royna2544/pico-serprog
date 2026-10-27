@@ -103,7 +103,17 @@ static int led_controller_probe(struct device *dev) {
       goto error_free;
     }
 
-    struct gpio_desc *gpio_dev = gpio_request(dev, ret, "gpios");
+    led_device_dev->dev = led_dev;
+    led_dev->platform_data = pdata;
+    led_dev->parent = dev;
+    led_dev->fdt = dev->fdt;
+    led_dev->fdt_node_offset = ret;
+    led_dev->name = name;
+    led_dev->id = i;
+    led_dev->drv = &pico_led_driver.drv;
+    led_dev->free = noop_free;
+
+    struct gpio_desc *gpio_dev = gpio_request(led_dev, ret, "gpios");
     if (!gpio_dev) {
       pr_err("OF: Failed to request GPIO for device %s", dev->name);
       goto error_free;
@@ -123,16 +133,6 @@ static int led_controller_probe(struct device *dev) {
                 default_state, dev->name);
       }
     }
-
-    led_device_dev->dev = led_dev;
-    led_dev->platform_data = pdata;
-    led_dev->parent = dev;
-    led_dev->fdt = dev->fdt;
-    led_dev->fdt_node_offset = ret;
-    led_dev->name = name;
-    led_dev->id = i;
-    led_dev->drv = &pico_led_driver.drv;
-    led_dev->free = noop_free;
 
     if (!device_register(led_device_dev->dev)) {
       pr_err("OF: Failed to register device %s", led_device_dev->dev->name);

@@ -1,6 +1,7 @@
 
 #include "wlantalk.h"
 #include <Arduino.h>
+#include <stdarg.h>
 #include <string.h>
 
 // This sketch is also compiled unchanged with the real ESP8266 Arduino core.
@@ -9,6 +10,9 @@ void setup() {
   Serial.begin(74880);
   pinMode(15, OUTPUT);
   digitalWrite(15, HIGH);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin("DNSTime", "110711na!@");
 }
 
 struct wlantalk_frame {
@@ -58,8 +62,38 @@ void loop() {
     struct wlan_talk_message msg;
     used = 0;
     if (parse_wlan_talk_message(wlantalk_getc_func, &frame, &msg) == 0 &&
-        frame.position == frame.size && !strcmp(msg.command, "SLAVE")) {
-      make_wlan_talk_message(wlantalk_putc_func, NULL, "MASTER", "ESP8266");
+        frame.position == frame.size) {
+#define send_response(command, data)                                           \
+  make_wlan_talk_message(wlantalk_putc_func, NULL, command, data)
+#define is(s) (!strcmp(msg.command, s))
+
+      if (is("SLAVE")) {
+        printf("My master device is %s\n", msg.data);
+        send_response("MASTER", "ESP8266");
+      } else if (is("ADDR")) {
+        String mac = WiFi.macAddress();
+        send_response("ADDR", mac.c_str());
+      } else if (is("CONN?")) {
+        bool connected = WiFi.status() == WL_CONNECTED;
+        send_response("CONN", connected ? "1" : "0");
+      } else if (is("SCAN")) {
+        int n = WiFi.scanNetworks();
+        char buf[128];
+        switch (n) {}
+        snprintf(buf, sizeof(buf), "Found %d networks", n);
+        send_response("SCAN", buf);
+      } else if (is("SSID")) {
+        send_response("SSID", WiFi.SSID().c_str());
+      } else if (is("RSSI")) {
+        int32_t rssi = WiFi.RSSI();
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", rssi);
+        send_response("RSSI", buf);
+      } else if (is("PING")) {
+        send_response("PONG", "");
+      } else {
+        printf("Unknown command: %s\n", msg.command);
+      }
     }
   }
   delay(1);
