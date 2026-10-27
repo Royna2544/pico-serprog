@@ -1,0 +1,12 @@
+socat -d -d \
+          pty,raw,echo=0,link=/tmp/mock-cdc0 \
+          pty,raw,echo=0,link=/tmp/host-cdc0&
+socat -d -d \
+          pty,raw,echo=0,link=/tmp/mock-cdc1 \
+          pty,raw,echo=0,link=/tmp/host-cdc1&
+socat -d -d \
+          pty,raw,echo=0,link=/tmp/mock-cdc2 \
+          pty,raw,echo=0,link=/tmp/host-cdc2&
+socat -d -d \
+  pty,raw,echo=0,link=/tmp/mock-uart0 \
+  pty,raw,echo=0,link=/tmp/host-uart0&

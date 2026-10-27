@@ -1,0 +1,225 @@
+/dts-v1/;
+
+/ {
+    model = "Raspberry Pi Pico SPI NOR Flasher";
+    compatible = "royna,spi-nor-flasher",
+                 "raspberrypi,pico",
+                 "raspberrypi,rp2040";
+
+    #address-cells = <1>;
+    #size-cells = <1>;
+
+    aliases {
+        spi0 = &spi0;
+        serial0 = &uart0;
+        serial1 = &uart1;
+        wlan0 = &esp0;
+        serprog0 = &serprog0;
+        passthru0 = &passthru0;
+        led0 = &led0;
+    };
+
+    chosen {
+        stdout-path = "serial0:115200n8";
+    };
+
+    soc0: soc {
+        compatible = "simple-bus";
+
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+
+        pinctrl: pinctrl@40014000 {
+            compatible = "royna,rp2040-pinctrl";
+            reg = <0x40014000 0x4000>;
+
+            uart0_default: uart0-default {
+                pins = "gpio0", "gpio1";
+                function = "uart";
+            };
+
+            uart1_default: uart1-default {
+                pins = "gpio8", "gpio9";
+                function = "uart";
+            };
+
+            spi0_default: spi0-default {
+                pins = "gpio2", "gpio3", "gpio4"; // SCK MOSI MISO
+                function = "spi";
+            };
+        };
+
+        gpio0: gpio@d0000000 {
+            compatible = "royna,rp2040-sio-gpio";
+            reg = <0xd0000000 0x1000>,<0x40014000 0x4000>;
+            reg-names = "sio", "io-bank0";
+
+            gpio-controller;
+            #gpio-cells = <2>;
+
+            interrupt-controller;
+            #interrupt-cells = <2>;
+
+            status = "okay";
+            //<&pinctrl GPIO_OFFSET PINCTRL_PIN_OFFSET COUNT>
+            gpio-ranges = <&pinctrl 0 0 30>;
+        };
+
+        spi0: spi@4003c000 {
+            compatible = "raspberrypi,rp2040-spi-master";
+            reg = <0x4003c000 0x4000>;
+
+            pinctrl-names = "default";
+            pinctrl-0 = <&spi0_default>;
+            default-baud = <10000000>;
+
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            flash: flash@0 {
+                compatible = "raspberrypi,rp2040-spi-chip";
+                reg = <0>;
+                default-baud = <10000000>;
+                cs-gpio = <&gpio0 5 1>;
+
+                status = "okay";
+            };
+        };
+
+        uart0: serial@40034000 {
+            compatible = "raspberrypi,rp2040-uart";
+            reg = <0x40034000 0x4000>;
+
+            default-baud = <115200>;
+
+            pinctrl-names = "default";
+            pinctrl-0 = <&uart0_default>;
+
+            status = "okay";
+        };
+
+        uart1: serial@40038000 {
+            compatible = "raspberrypi,rp2040-uart";
+            reg = <0x40038000 0x4000>;
+
+            default-baud = <74880>;
+
+            pinctrl-names = "default";
+            pinctrl-0 = <&uart1_default>;
+
+            status = "okay";
+
+            esp0: wifi {
+                compatible = "espressif,esp8266";
+
+                enable-gpios = <&gpio0 18 0>;   // pulldown 10k by esp board
+                reset-gpios = <&gpio0 19 1>;  // pullup 10k by my board
+                boot-gpios = <&gpio0 20 1>;// pullup 10k by my board
+
+                /* ESP8266 GPIO2 / GPIO15 boot straps */
+                strap-gpio2-gpios = <&gpio0 21 0>; // pullup 10k by my board
+                strap-gpio15-gpios = <&gpio0 22 1>; // pulldown 10k by esp board
+
+                // HIGH=4 LOW=8 FALLING=2 RISING=1
+                interrupts-extended = <&gpio0 22 1>;
+                status = "okay";
+            };
+        };
+
+        usb0: usb@50110000 {
+            compatible = "royna,rp2040-usb";
+            reg = <0x50110000 0x1000>,
+                  <0x50100000 0x1000>;
+            reg-names = "regs", "dpram";
+
+            dr_mode = "peripheral";
+            status = "disabled";
+        };
+    };
+
+    leds {
+        compatible = "gpio-leds";
+
+        led0: led-0 {
+            gpios = <&gpio0 25 0>;
+            default-state = "off";
+        };
+    };
+
+    fw: firmware {
+        usb_gadget: usb-gadget {
+            compatible = "royna,rp2040-usb-gadget";
+            controller = <&usb0>;
+
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            cdc0: serial@0 {
+                compatible = "royna,rp2040-usb-cdc";
+                reg = <0>;
+                status = "okay";
+            };
+
+            cdc1: serial@1 {
+                compatible = "royna,rp2040-usb-cdc";
+                reg = <1>;
+                royna,stdio;
+                status = "okay";
+            };
+
+            cdc2: serial@2 {
+                compatible = "royna,rp2040-usb-cdc";
+                reg = <2>;
+                status = "okay";
+            };
+        };
+
+        serprog1: serprog {
+            compatible = "royna,serprog";
+
+            spi-chip = <&flash>;
+            usb-cdc = <&cdc0>;
+
+            status = "disabled";
+        };
+
+        passthru0: passthru {
+            compatible = "royna,passthru";
+
+            usb-cdc = <&cdc2>;
+            uart = <&uart1>;
+        };
+    };
+};
+
+&soc0 {
+    spifake: spi@190 {
+        compatible = "fake,spi-master";
+        reg = <0x190 0x4000>;
+        status = "okay";
+
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        default-baud = <10000000>;
+
+        flashfake: flash@20 {
+            compatible = "fake,spi-chip";
+            reg = <32>;
+
+            status = "okay";
+        };
+    };
+};
+
+&fw {
+    serprog0: serprog-fake {
+        compatible = "royna,serprog";
+
+        spi-chip = <&flashfake>;
+        usb-cdc = <&cdc0>;
+
+        status = "okay";
+    };
+};

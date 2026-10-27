@@ -1,0 +1,9 @@
+.section .rodata.board_dtb, "a", %progbits
+.balign 8
+
+.global board_dtb_start
+.global board_dtb_end
+
+board_dtb_start:
+    .incbin "@DTB@"
+board_dtb_end:

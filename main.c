@@ -1,397 +1,164 @@
 /**
  * Copyright (C) 2021, Mate Kukri <km@mkukri.xyz>
  * Based on "pico-serprog" by Thomas Roth <code@stacksmashing.net>
- * 
+ *
  * Licensed under GPLv3
  *
  * Also based on stm32-vserprog:
  *  https://github.com/dword1511/stm32-vserprog
- * 
+ *
  */
 
+#include "core/devicetree.h"
+#include "core/init.h"
+#include "core/printk.h"
+#include "drivers/leddrv.h"
+#include "drivers/passthru.h"
+#include "drivers/serprog.h"
+#include "drivers/wlandrv.h"
+#include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
-#include "hardware/spi.h"
-#include "tusb.h"
-#include "serprog.h"
+#include <stdio.h>
 
-#define CDC_ITF     0           // USB CDC interface no
+#ifndef MOCK_HARDWARE
+#include "core/panic.h"
+#endif
 
-#define SPI_IF      spi0        // Which PL022 to use
-#define SPI_BAUD    10000000    // Default baudrate (4 MHz - SPI default)
-#define SPI_CS      5
-#define SPI_MISO    4
-#define SPI_MOSI    3
-#define SPI_SCK     2
-#define MAX_BUFFER_SIZE 256
-#define MAX_OPBUF_SIZE 64
-#define SERIAL_BUFFER_SIZE 64
+#include "drivers/uartdrv.h"
+#include <sys/errno.h>
 
-// Define a global operation buffer and a pointer to track the current position
-uint8_t opbuf[MAX_OPBUF_SIZE];
-uint32_t opbuf_pos = 0;
-
-static void enable_spi(uint baud)
-{
-    // Setup chip select GPIO
-    gpio_init(SPI_CS);
-    gpio_put(SPI_CS, 1);
-    gpio_set_dir(SPI_CS, GPIO_OUT);
-
-    // Setup PL022
-    spi_init(SPI_IF, baud);
-    gpio_set_function(SPI_MISO, GPIO_FUNC_SPI);
-    gpio_set_function(SPI_MOSI, GPIO_FUNC_SPI);
-    gpio_set_function(SPI_SCK,  GPIO_FUNC_SPI);
+void core1_entry() {
+  struct device *serprog_dev = device_find_by_alias("serprog0");
+  if (!serprog_dev) {
+    pr_err("Failed to find serprog device");
+    return;
+  }
+  serprogdrv_process_commands(serprog_dev);
 }
 
-static void disable_spi()
-{
-    // Set all pins to SIO inputs
-    gpio_init(SPI_CS);
-    gpio_init(SPI_MISO);
-    gpio_init(SPI_MOSI);
-    gpio_init(SPI_SCK);
+#ifdef MOCK_HARDWARE
+#include "boardstate-daemon/client.h"
+#include <signal.h>
+void sigint_handler(int signum) {
+  (void)signum;
+  pr_info("SIGINT received, exiting...");
+  signal(SIGINT, SIG_DFL);
+  exit(0);
+}
+#endif
 
-    // Disable all pulls
-    gpio_set_pulls(SPI_CS, 0, 0);
-    gpio_set_pulls(SPI_MISO, 0, 0);
-    gpio_set_pulls(SPI_MOSI, 0, 0);
-    gpio_set_pulls(SPI_SCK, 0, 0);
+#include "esp8266/wlantalk.h"
 
-    // Disable SPI peripheral
-    spi_deinit(SPI_IF);
+static int wlantalk_getc_func(void *privdata) {
+  struct device *dev = (struct device *)privdata;
+  uint8_t c;
+  int rc = wlan_talk(dev, NULL, 0, (char *)&c, 1);
+  if (rc < 0) {
+    pr_err("Failed to read byte from UART: %d", rc);
+    return -1;
+  }
+  return (int)c;
 }
 
-static inline void cs_select(uint cs_pin) {
-    sleep_us(1); // 1 microsecond delay; adjust as needed
-    gpio_put(cs_pin, 0);
-    sleep_us(1); // Additional delay after CS is pulled low
+static void wlantalk_putc_func(void *privdata, int c) {
+  struct device *dev = (struct device *)privdata;
+  uint8_t byte = (uint8_t)c;
+  int rc = wlan_talk(dev, (const char *)&byte, 1, NULL, 0);
+  if (rc < 0) {
+    pr_err("Failed to write byte to UART: %d", rc);
+  }
 }
 
-static inline void cs_deselect(uint cs_pin) {
-    sleep_us(1); // Delay before pulling CS high
-    gpio_put(cs_pin, 1);
-    sleep_us(1); // Additional delay after CS is pulled high
-}
-
-static void wait_for_read(void)
-{
-    do
-        tud_task();
-    while (!tud_cdc_n_available(CDC_ITF));
-}
-
-static inline void readbytes_blocking(void *b, uint32_t len)
-{
-    while (len) {
-        wait_for_read();
-        uint32_t r = tud_cdc_n_read(CDC_ITF, b, len);
-        b += r;
-        len -= r;
+static void wlan_talk_loop(struct device *wlan_dev) {
+  struct wlan_talk_message msg;
+  make_wlan_talk_message(wlantalk_putc_func, wlan_dev, "SLAVE", "pico-serprog");
+  while (1) {
+    if (parse_wlan_talk_message(wlantalk_getc_func, wlan_dev, &msg) < 0) {
+      pr_err("Failed to parse WLAN talk message");
+      continue;
     }
-}
-
-static inline uint8_t readbyte_blocking(void)
-{
-    wait_for_read();
-    uint8_t b;
-    tud_cdc_n_read(CDC_ITF, &b, 1);
-    return b;
-}
-
-static void wait_for_write(void)
-{
-    do {
-        tud_task();
-    } while (!tud_cdc_n_write_available(CDC_ITF));
-}
-
-static inline void sendbytes_blocking(const void *b, uint32_t len)
-{
-    while (len) {
-        // wait_for_write();
-        uint32_t w = tud_cdc_n_write(CDC_ITF, b, len);
-        b += w;
-        len -= w;
+    pr_info("Parsed WLAN talk message: command='%s', data='%s'", msg.command,
+            msg.data);
+    if (make_wlan_talk_message(wlantalk_putc_func, wlan_dev, msg.command,
+                               msg.data) < 0) {
+      pr_err("Failed to make WLAN talk message");
     }
+  }
 }
 
-static inline void sendbyte_blocking(uint8_t b)
-{
-    wait_for_write();
-    tud_cdc_n_write(CDC_ITF, &b, 1);
-}
+int main() {
+  stdio_init_all();
+#ifdef MOCK_HARDWARE
+  sleep_ms(5);
+  if (board_reset_pico() < 0) {
+    pr_err("Failed to reset virtual Pico board");
+    return EXIT_FAILURE;
+  }
+#endif
+#ifndef MOCK_HARDWARE
+  printf("\x1b[2J\x1b[3J\x1b[H");
+#endif
 
-static void command_loop(void)
-{
-    uint baud = spi_get_baudrate(SPI_IF);
+  pr_info("Start, pico-serprog-with-wifi " __DATE__ " " __TIME__);
+  pr_info("Build features: +WLAN +ESP8266 +SUFFERING -SANITY +LEDRGB +SMP "
+          "+SDCARD ++LINUX");
 
-    for (;;) {
-        switch (readbyte_blocking()) {
-        case S_CMD_NOP:
-            sendbyte_blocking(S_ACK);
-            break;
-        case S_CMD_Q_IFACE:
-            sendbyte_blocking(S_ACK);
-            sendbyte_blocking(0x01);
-            sendbyte_blocking(0x00);
-            break;
-        case S_CMD_Q_RDNMAXLEN:
-        case S_CMD_Q_WRNMAXLEN:
-            {
-                sendbyte_blocking(S_ACK);
+  int rc;
+  if ((rc = __initcall_for_each(early)) || (rc = __initcall_for_each(core)) ||
+      (rc = __initcall_for_each(drivers)) ||
+      (rc = __initcall_for_each(postcore))) {
+#ifdef MOCK_HARDWARE
+    pr_err("Initialization failed: %d", rc);
+    return EXIT_FAILURE;
+#else
+    do_panic("Initialization failed: %d", rc);
+#endif
+  }
 
-                // Break down MAX_BUFFER_SIZE into three bytes (24 bits) in little-endian format
-                sendbyte_blocking(32 & 0xFF);         // LSB
-                sendbyte_blocking((32 >> 8) & 0xFF);  // Middle byte
-                sendbyte_blocking((32 >> 16) & 0xFF); // MSB
+  extern void drvcore_exit(void);
+  atexit(drvcore_exit);
 
-                break;
-            }
-        case S_CMD_Q_CMDMAP:
-            {
-                static const uint32_t cmdmap[8] = {
-                      (1 << S_CMD_NOP)       |
-                      (1 << S_CMD_Q_IFACE)   |
-                      (1 << S_CMD_Q_RDNMAXLEN)   |
-                      (1 << S_CMD_Q_WRNMAXLEN)   |
-                      (1 << S_CMD_Q_CMDMAP)  |
-                      (1 << S_CMD_Q_PGMNAME) |
-                      (1 << S_CMD_Q_SERBUF)  |
-                      (1 << S_CMD_Q_BUSTYPE) |
-                      (1 << S_CMD_SYNCNOP)   |
-                      (1 << S_CMD_O_SPIOP)   |
-                      (1 << S_CMD_S_BUSTYPE) |
-                      (1 << S_CMD_S_SPI_FREQ)|
-                      (1 << S_CMD_R_BYTE)|
-                      (1 << S_CMD_O_WRITEB)|
-                      (1 << S_CMD_O_INIT)|
-                      (1 << S_CMD_O_EXEC)
-                };
+  multicore_launch_core1(core1_entry);
+#ifdef MOCK_HARDWARE
+  signal(SIGINT, sigint_handler);
+#endif
 
-                sendbyte_blocking(S_ACK);
-                sendbytes_blocking((uint8_t *) cmdmap, sizeof cmdmap);
-                break;
-            }
-        case S_CMD_Q_PGMNAME:
-            {
-                static const char progname[16] = "pico-serprog";
+  struct device *led_dev = device_find_by_alias("led0");
+  if (!led_dev) {
+    pr_err("Failed to find led device");
+    return EXIT_FAILURE;
+  }
+  struct led_device_driver *led_drv =
+      container_of(led_dev->drv, struct led_device_driver, drv);
+  led_set_state(led_dev, true); // Turn on the LED
 
-                sendbyte_blocking(S_ACK);
-                sendbytes_blocking(progname, sizeof progname);
-                break;
-            }
-        case S_CMD_Q_SERBUF:
-            {
-                sendbyte_blocking(S_ACK);
+  struct device *wlan_dev = device_find_by_alias("wlan0");
+  if (!wlan_dev) {
+    pr_err("Failed to find wlan device");
+    return EXIT_FAILURE;
+  }
 
-                // Send the buffer size as a 16-bit little-endian value
-                uint16_t bufferSizeLE = SERIAL_BUFFER_SIZE & 0xFFFF;
-                sendbyte_blocking((uint8_t)(bufferSizeLE & 0xFF));        // Lower byte
-                sendbyte_blocking((uint8_t)((bufferSizeLE >> 8) & 0xFF)); // Upper byte
-
-                break;
-            }
-        case S_CMD_Q_BUSTYPE:
-            sendbyte_blocking(S_ACK);
-            sendbyte_blocking((1 << 3)); // BUS_SPI
-            break;
-        case S_CMD_SYNCNOP:
-            sendbyte_blocking(S_NAK);
-            sendbyte_blocking(S_ACK);
-            break;
-        case S_CMD_S_BUSTYPE:
-            // If SPI is among the requsted bus types we succeed, fail otherwise
-            if((uint8_t) readbyte_blocking() & (1 << 3))
-                sendbyte_blocking(S_ACK);
-            else
-                sendbyte_blocking(S_NAK);
-            break;
-        case S_CMD_O_SPIOP:
-            {
-                uint32_t slen, rlen;
-                readbytes_blocking(&slen, 3); // Read send length
-                readbytes_blocking(&rlen, 3); // Read receive length
-                slen &= 0x00FFFFFF; // Mask to use only the lower 24 bits
-                rlen &= 0x00FFFFFF; // Mask to use only the lower 24 bits
-
-                uint8_t tx_buffer[MAX_BUFFER_SIZE]; // Buffer for transmit data
-                uint8_t rx_buffer[MAX_BUFFER_SIZE]; // Buffer for receive data
-
-                // Read data to be sent (if slen > 0)
-                if (slen > 0) {
-                    readbytes_blocking(tx_buffer, slen);
-                }
-
-                // Perform SPI operation
-                cs_select(SPI_CS);
-                if (slen > 0) {
-                    spi_write_blocking(SPI_IF, tx_buffer, slen);
-                }
-                if (rlen > 0 && rlen < MAX_BUFFER_SIZE ) {
-                    spi_read_blocking(SPI_IF, 0, rx_buffer, rlen);
-                    // Send ACK followed by received data
-                    sendbyte_blocking(S_ACK);
-                    if (rlen > 0) {
-                        sendbytes_blocking(rx_buffer, rlen);
-                    }
-
-                    cs_deselect(SPI_CS);
-                    break;
-                }
-
-                // Send ACK after handling slen (before reading)
-                sendbyte_blocking(S_ACK);
-
-                // Handle receive operation in chunks for large rlen
-                uint32_t chunk;
-                char buf[128];
-
-                for(uint32_t i = 0; i < rlen; i += chunk) {
-                    chunk = MIN(rlen - i, sizeof(buf));
-                    spi_read_blocking(SPI_IF, 0, buf, chunk);
-                    // Send ACK followed by received data
-                    sendbyte_blocking(S_ACK);
-                    sendbytes_blocking(buf, rlen);
-                }
-                cs_deselect(SPI_CS);
-                break;
-            }
-            case S_CMD_S_SPI_FREQ:
-            {
-                uint32_t want_baud;
-                readbytes_blocking(&want_baud, 4);
-                if (want_baud) {
-                    // Set frequence
-                    baud = spi_set_baudrate(SPI_IF, want_baud);
-                    // Send back actual value
-                    sendbyte_blocking(S_ACK);
-                    sendbytes_blocking(&baud, 4);
-                } else {
-                    // 0 Hz is reserved
-                    sendbyte_blocking(S_NAK);
-                }
-                break;
-            }
-        case S_CMD_R_BYTE:
-            {
-                uint32_t addr;
-                readbytes_blocking(&addr, 3);
-                uint8_t data;
-
-                cs_select(SPI_CS);
-                spi_write_blocking(SPI_IF, (uint8_t*)&addr, 3); // Send address
-                spi_read_blocking(SPI_IF, 0, &data, 1); // Read one byte
-                cs_deselect(SPI_CS);
-
-                sendbyte_blocking(S_ACK);
-                sendbyte_blocking(data);
-                break;
-            }
-        case S_CMD_R_NBYTES:
-            {
-                uint32_t addr, len;
-                readbytes_blocking(&addr, 3);
-                readbytes_blocking(&len, 3);
-
-                uint8_t buffer[MAX_BUFFER_SIZE]; // Define MAX_BUFFER_SIZE based on your hardware capability
-
-                cs_select(SPI_CS);
-                spi_write_blocking(SPI_IF, (uint8_t*)&addr, 3); // Send address
-
-                while (len > 0) {
-                    uint32_t chunk_size = (len < MAX_BUFFER_SIZE) ? len : MAX_BUFFER_SIZE;
-                    spi_read_blocking(SPI_IF, 0, buffer, chunk_size);
-                    sendbytes_blocking(buffer, chunk_size);
-                    len -= chunk_size;
-                }
-
-                cs_deselect(SPI_CS);
-
-                sendbyte_blocking(S_ACK);
-                break;
-            }
-        case S_CMD_O_WRITEB:
-            {
-                if (opbuf_pos + 5 > MAX_OPBUF_SIZE) {
-                    sendbyte_blocking(S_NAK);
-                    break;
-                }
-
-                uint32_t addr;
-                uint8_t byte;
-                readbytes_blocking(&addr, 3);
-                byte = readbyte_blocking();
-
-                // Store in operation buffer (assuming format: 1-byte command, 3-byte address, 1-byte data)
-                opbuf[opbuf_pos++] = S_CMD_O_WRITEB;
-                memcpy(&opbuf[opbuf_pos], &addr, 3);
-                opbuf_pos += 3;
-                opbuf[opbuf_pos++] = byte;
-
-                sendbyte_blocking(S_ACK);
-                break;
-            }
-        case S_CMD_O_INIT:
-            {
-                opbuf_pos = 0; // Reset the operation buffer position
-                memset(opbuf, 0, MAX_OPBUF_SIZE); // Clear the buffer (optional)
-                sendbyte_blocking(S_ACK);
-                break;
-            }
-        case S_CMD_O_EXEC:
-            {
-                if (opbuf_pos == 0) {
-                    sendbyte_blocking(S_NAK);
-                    break;
-                }
-
-                // Send ACK before handling the operation buffer
-                sendbyte_blocking(S_ACK);
-
-                // Handle the operation buffer
-                uint32_t i = 0;
-                while (i < opbuf_pos) {
-                    uint8_t cmd = opbuf[i++];
-                    uint32_t addr;
-                    uint8_t byte;
-
-                    switch (cmd) {
-                    case S_CMD_O_WRITEB:
-                        memcpy(&addr, &opbuf[i], 3);
-                        i += 3;
-                        byte = opbuf[i++];
-                        cs_select(SPI_CS);
-                        spi_write_blocking(SPI_IF, (uint8_t*)&addr, 3); // Send address
-                        spi_write_blocking(SPI_IF, &byte, 1); // Send data
-                        cs_deselect(SPI_CS);
-                        break;
-                    default:
-                        sendbyte_blocking(S_NAK);
-                        break;
-                    }
-                }
-
-                // Send ACK after handling the operation buffer
-                sendbyte_blocking(S_ACK);
-                break;
-            }
-        default:
-            sendbyte_blocking(S_NAK);
-            break;
-        }
-
-        tud_cdc_n_write_flush(CDC_ITF);
+  enum wlan_driver_boot_mode bootmode = WLAN_BOOT_NORMAL;
+  wlan_set_boot_mode(wlan_dev, bootmode);
+  switch (bootmode) {
+  case WLAN_BOOT_NORMAL: {
+    wlan_talk_loop(wlan_dev);
+    break;
+  }
+  case WLAN_BOOT_UPLOAD: {
+    struct device *passthru_dev = device_find_by_alias("passthru0");
+    if (!passthru_dev) {
+      pr_err("Failed to find passthru device");
+      return EXIT_FAILURE;
     }
-}
 
-int main()
-{
-    // Setup USB
-    tusb_init();
-    // Setup PL022 SPI
-    enable_spi(SPI_BAUD);
-
-    command_loop();
+    bool stop = false;
+    passthru_handle_loop(passthru_dev, &stop);
+    break;
+  }
+  default:
+    pr_err("Unknown boot mode: %d", bootmode);
+    return EXIT_FAILURE;
+  }
 }
