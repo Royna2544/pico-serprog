@@ -129,6 +129,7 @@ static int esp8266_boot(struct device *dev, enum wlan_driver_boot_mode mode) {
     }
 
     // Wait for GPIO0 to read LOW, indicating the ESP8266 is ready
+    esp8266_ready = false;
     int rc = devm_request_irq(dev, pdata->bootpin_irq, callback,
                               &pdata->bootpin_irq);
     if (rc < 0) {
@@ -142,7 +143,6 @@ static int esp8266_boot(struct device *dev, enum wlan_driver_boot_mode mode) {
     gpio_set_value(pdata->en_pin, 1);     // Enable ESP8266
 
     dev_info(dev, "ESP8266 waiting firmare ack..");
-    esp8266_ready = false;
     gpio_reset(pdata->gpio15_pin); // Reset GPIO15 to default state (Hi-Z input)
 
     do {

@@ -49,34 +49,41 @@ static int translate_ours_to_pico_irq_flags(irq_event_t event) {
   return pico_irq_flags;
 }
 
+static irq_event_t translate_pico_to_ours_irq_flags(uint32_t flags) {
+  irq_event_t event = IRQ_EVENT_NONE;
+  if (flags & GPIO_IRQ_EDGE_RISE)
+    event |= IRQ_EVENT_RISING_EDGE;
+  if (flags & GPIO_IRQ_EDGE_FALL)
+    event |= IRQ_EVENT_FALLING_EDGE;
+  if (flags & GPIO_IRQ_LEVEL_HIGH)
+    event |= IRQ_EVENT_HIGH_LEVEL;
+  if (flags & GPIO_IRQ_LEVEL_LOW)
+    event |= IRQ_EVENT_LOW_LEVEL;
+  return event;
+}
+
 static struct irq_domain *g_irq_domain = NULL;
 static void gpio_irq_handler(void) {
+  struct irq_domain *domain = g_irq_domain;
+  if (IS_ERR_OR_NULL(domain))
+    return;
+
   pr_debug("GPIO: Handling IRQ for GPIO bank 0");
   struct list_head *pos;
-  list_for_each(pos, &g_irq_domain->map_list) {
+  list_for_each(pos, &domain->map_list) {
     struct irq_data *data = container_of(pos, struct irq_data, list);
-    if (!data || !data->chip_data) {
-      pr_err("GPIO: Invalid irq_data or chip_data for GPIO pin %d",
-             data->hw_irq);
+    if (!data->chip_data)
       continue;
-    }
     int pin = data->hw_irq;
-    int event = gpio_get_irq_event_mask(pin);
-    describe_pico_mask(NULL, pin, event);
-    struct irq_domain *domain = g_irq_domain;
-    if (!domain) {
-      pr_err("GPIO: No IRQ domain found for GPIO pin %d", pin);
-      break;
-    }
-    struct irq_data *irq_data = irq_domain_find_mapping(domain, pin);
-    if (IS_ERR(irq_data)) {
-      // No mapping found for this pin, continue to the next pin
+    uint32_t event = gpio_get_irq_event_mask(pin);
+    if (!event)
       continue;
-    }
-    if (domain->chip->ack(domain->chip, irq_data)) {
-      pr_err("GPIO: Failed to acknowledge IRQ");
-    }
-    int rc = generic_irq_handle(domain, irq_data->irq, event);
+
+    describe_pico_mask(NULL, pin, event);
+    // Acknowledge only the snapshot being dispatched, not every configured edge.
+    gpio_acknowledge_irq(pin, event);
+    int rc = generic_irq_handle(domain, data->irq,
+                                translate_pico_to_ours_irq_flags(event));
     if (rc < 0) {
       pr_err("GPIO: Dispatch returned %d.", rc);
     }
@@ -309,6 +316,10 @@ static struct gpio_desc *gpiodrv_request(struct device *dev,
 
 static void gpiodrv_release(struct device *request_dev,
                             struct gpio_desc *desc) {
+  int rc = gpiochip_release_pin(desc->master, request_dev, desc);
+  if (rc)
+    dev_warn(desc->master, "Failed to release GPIO pin %d claim: %d",
+             desc->pin, rc);
   gpiodrv_reset(desc);
   free(desc);
 }

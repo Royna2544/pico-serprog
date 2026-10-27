@@ -20,6 +20,7 @@ bool device_register(struct device *dev) {
   dev->deferred = false;
   dev->pinctrl_applied = false;
   int rc = 0;
+  struct irq_data *new_irq_mapping = NULL;
 
   rc = apply_pinctrl_default(dev);
   int pinctrl_rc = rc;
@@ -66,9 +67,9 @@ bool device_register(struct device *dev) {
     int hw_irq;
     irq_event_t event;
 
-    if (!domain->ops->xlate) {
-      pr_err("OF: IRQ domain for device %s has no xlate function", dev->name);
-      rc = EINVAL;
+    if (!domain->ops || !domain->ops->xlate || !domain->ops->map) {
+      pr_err("OF: IRQ domain for device %s has incomplete operations", dev->name);
+      rc = -EINVAL;
       goto skip_probe;
     }
 
@@ -78,7 +79,6 @@ bool device_register(struct device *dev) {
     if (rc < 0) {
       pr_err("OF: Failed to translate interrupts-extended for device %s",
              dev->name);
-      rc = ENODEV;
       goto skip_probe;
     }
 
@@ -95,6 +95,7 @@ bool device_register(struct device *dev) {
       rc = PTR_ERR(data);
       goto skip_probe;
     }
+    new_irq_mapping = data;
 
     rc = domain->ops->map(domain, data);
     if (rc < 0) {
@@ -139,6 +140,13 @@ skip_probe:
   }
   assert(rc <= 0);
   if (rc < 0) {
+    if (new_irq_mapping) {
+      struct irq_domain *domain = new_irq_mapping->domain;
+      if (domain->ops->unmap)
+        domain->ops->unmap(domain, new_irq_mapping);
+      list_del(&new_irq_mapping->list);
+      free(new_irq_mapping);
+    }
     if (pinctrl_rc == 0) {
       remove_pinctrl_default(dev);
     }
@@ -194,19 +202,50 @@ bool driver_register(struct driver *drv) {
   return true;
 }
 
-const struct driver *driver_find_by_compatible(const char *compatible) {
+static const struct driver *driver_find_match(
+    const char *compatible, const struct driver_fdt_match_id **matched) {
+  if (!compatible)
+    return NULL;
+
   struct list_head *d;
   list_for_each(d, &drivers) {
     const struct driver *drv = container_of(d, struct driver, list);
     const struct driver_fdt_match_id *match = drv->match_table;
     while (match && match->compatible) {
       if (strcmp(match->compatible, compatible) == 0) {
+        if (matched)
+          *matched = match;
         return drv;
       }
       match++;
     }
   }
   return NULL;
+}
+
+const struct driver *driver_find_by_compatible(const char *compatible) {
+  return driver_find_match(compatible, NULL);
+}
+
+const struct driver *driver_find_for_device(struct device *dev) {
+  const struct driver_fdt_match_id *match = NULL;
+  const struct driver *drv = NULL;
+  dev->driver_data = NULL;
+  int count = dev->fdt ? fdt_stringlist_count(dev->fdt, dev->fdt_node_offset,
+                                             "compatible") : 0;
+  if (count > 0) {
+    // Device-tree compatible strings are ordered from specific to general.
+    for (int i = 0; i < count && !drv; i++) {
+      const char *compatible = fdt_stringlist_get(
+          dev->fdt, dev->fdt_node_offset, "compatible", i, NULL);
+      drv = driver_find_match(compatible, &match);
+    }
+  } else {
+    drv = driver_find_match(dev->compatible, &match);
+  }
+  if (match)
+    dev->driver_data = match->data;
+  return drv;
 }
 
 void drvcore_exit(void) {
@@ -241,7 +280,7 @@ static int retry_deferred() {
         continue;
       }
       if (!dev->drv) {
-        dev->drv = driver_find_by_compatible(dev->compatible);
+        dev->drv = driver_find_for_device(dev);
         if (!dev->drv) {
           pr_warn(
               "DRVCORE: Still no driver found for device %s with compatible %s",

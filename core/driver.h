@@ -74,6 +74,7 @@ __attribute__((format(printf, 2, 3))) void _dev_msg(struct device *dev,
 
 bool driver_register(struct driver *drv);
 const struct driver *driver_find_by_compatible(const char *compatible);
+const struct driver *driver_find_for_device(struct device *dev);
 
 #define container_of(ptr, type, member)                                        \
   ((type *)((char *)(ptr) - offsetof(type, member)))

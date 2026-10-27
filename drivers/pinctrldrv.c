@@ -294,7 +294,8 @@ int pinctrl_gpio_release(struct device *dev, const struct device *requester,
 
   for (int i = 0; i < pdata->num_mappings; i++) {
     struct pinctrl_mapping *mapping = &pdata->mappings[i];
-    if (mapping->used_by == requester) {
+    // Named pinctrl states are persistent configuration, not GPIO claims.
+    if (!mapping->state_name && mapping->used_by == requester) {
       for (int j = 0; j < mapping->num_pins; j++) {
         if (mapping->pins[j] == pin->pin) {
           // Remove that specific pin from the mapping and free the mapping if
@@ -305,7 +306,6 @@ int pinctrl_gpio_release(struct device *dev, const struct device *requester,
           mapping->num_pins--;
           if (mapping->num_pins == 0) {
             free(mapping->pins);
-            free(mapping);
             // Shift remaining mappings down
             for (int k = i; k < pdata->num_mappings - 1; k++) {
               pdata->mappings[k] = pdata->mappings[k + 1];

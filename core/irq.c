@@ -82,25 +82,23 @@ void devm_free_irq(struct device *dev, int irq) {
   list_for_each_safe(pos, tmp, &irq_node_list) {
     struct irq_node *node = container_of(pos, struct irq_node, list);
     if (node->irq == irq) {
-      // Free the IRQ node
-      list_del(&node->list);
-      free(node);
-      // Disable the IRQ in the associated irq_chip
+      // Stop delivery before unpublishing the handler.
       struct irq_data *data = irq_domain_find_mapping_by_virq(irq);
-      if (IS_ERR_OR_NULL(data)) {
-        continue; // No mapping found for this IRQ in this domain
+      struct irq_domain *domain = IS_ERR_OR_NULL(data) ? NULL : data->domain;
+      if (!IS_ERR_OR_NULL(domain) && !IS_ERR_OR_NULL(domain->chip)) {
+        domain->chip->disable(domain->chip, data);
+        list_del(&node->list);
+        free(node);
+        dev_dbg(dev, "Freeing IRQ %d for device %s, refcount %d", irq, dev->name,
+                domain->chip->refcount);
+        if (domain->chip->refcount == 1) {
+          domain->chip->exit(domain->chip);
+        }
+        domain->chip->refcount--;
+      } else {
+        list_del(&node->list);
+        free(node);
       }
-      struct irq_domain *domain = data->domain;
-      if (IS_ERR_OR_NULL(domain) || IS_ERR_OR_NULL(domain->chip)) {
-        continue; // No domain found for this IRQ
-      }
-      domain->chip->disable(domain->chip, data);
-      dev_dbg(dev, "Freeing IRQ %d for device %s, refcount %d", irq, dev->name,
-              domain->chip->refcount);
-      if (domain->chip->refcount == 1) {
-        domain->chip->exit(domain->chip);
-      }
-      domain->chip->refcount--;
       break;
     }
   }
@@ -111,7 +109,7 @@ int irq_domain_create_mapping(struct irq_domain *domain, hw_irq_t offset) {
   if (!domain) {
     return -EINVAL;
   }
-  if (offset >= domain->size) {
+  if (offset < 0 || offset >= domain->size) {
     dev_err(domain->master, "IRQ offset %d exceeds domain size %d", offset,
             domain->size);
     return -EINVAL;

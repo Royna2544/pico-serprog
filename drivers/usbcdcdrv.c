@@ -7,20 +7,26 @@
 #include <sys/errno.h>
 #include <sys/types.h>
 
+#define USB_CDC_WAIT_TIMEOUT_MS 10
+
 static mutex_t usb_cdc_task_mutex;
 
 __attribute__((constructor)) static void init_usb_cdc_task_mutex() {
   mutex_init(&usb_cdc_task_mutex);
 }
 
-static void safe_cdc_tud_task() {
+static void safe_cdc_tud_task_timeout(uint32_t timeout_ms) {
   if (!mutex_try_enter(&usb_cdc_task_mutex, NULL)) {
     // If we can't acquire the mutex, it means another thread is already
     // running tud_task(). We can safely skip this call to avoid deadlock.
     return;
   }
-  tud_task_ext(0, false);
+  tud_task_ext(timeout_ms, false);
   mutex_exit(&usb_cdc_task_mutex);
+}
+
+static void safe_cdc_tud_task(void) {
+  safe_cdc_tud_task_timeout(0);
 }
 
 static int usb_gadget_probe(struct device *dev) {
@@ -258,13 +264,13 @@ static void usb_cdc_remove(struct device *dev) {
 
 static void wait_for_read(int intf) {
   while (!tud_cdc_n_available(intf)) {
-    safe_cdc_tud_task();
+    safe_cdc_tud_task_timeout(USB_CDC_WAIT_TIMEOUT_MS);
   }
 }
 
 static void wait_for_write(int intf) {
   while (!tud_cdc_n_write_available(intf)) {
-    safe_cdc_tud_task();
+    safe_cdc_tud_task_timeout(USB_CDC_WAIT_TIMEOUT_MS);
   }
 }
 

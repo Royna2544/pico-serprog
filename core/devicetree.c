@@ -64,17 +64,7 @@ static void add_recursive_devices(const void *fdt, int node_offset,
               "compatible %s",
               parent ? parent->name : "(null)", name, compatible);
     }
-    dev->drv = driver_find_by_compatible(compatible);
-    if (dev->drv) {
-      // provide driver the match table's .data field for use in probe
-      const struct driver_fdt_match_id *match = dev->drv->match_table;
-      while (match && match->compatible) {
-        if (!strcmp(match->compatible, compatible)) {
-          dev->driver_data = match->data;
-          break;
-        }
-      }
-    }
+    dev->drv = driver_find_for_device(dev);
 
     if ((probe_ok = !device_register(dev))) {
       pr_err("OF: Failed to register device %s", dev->name);
