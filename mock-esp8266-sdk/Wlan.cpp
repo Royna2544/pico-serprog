@@ -635,13 +635,6 @@ bool valid_address_tuple(IPAddress ip, IPAddress subnet) {
 
 } // namespace
 
-String IPAddress::toString() const {
-  char text[16];
-  std::snprintf(text, sizeof(text), "%u.%u.%u.%u", bytes_[0], bytes_[1],
-                bytes_[2], bytes_[3]);
-  return String(text);
-}
-
 ESP8266WiFiClass WiFi;
 
 bool ESP8266WiFiClass::mode(WiFiMode_t newMode) {

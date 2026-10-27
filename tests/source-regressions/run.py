@@ -43,7 +43,13 @@ def main():
             if cxx:
                 cmd += ["-std=c++17", "-I" + str(ROOT / "mock-esp8266-sdk")]
             cmd += [str(Path(__file__).parent / source), str(build / "libfdt.a"),
-                    "-pthread", "-o", binary]
+                    "-pthread"]
+            if cxx:
+                # The sketch also calls WiFi; keep its host implementation linked.
+                cmd += [str(build / "libesp-mock-sdk.a"), str(build / "libboardstate-client.a")]
+                cmd += shlex.split(subprocess.check_output(
+                    ["pkg-config", "--libs", "libnm", "openssl"], text=True))
+            cmd += ["-o", binary]
             subprocess.run(cmd, check=True)
             for case in cases:
                 subprocess.run([binary] + ([case] if case else []),

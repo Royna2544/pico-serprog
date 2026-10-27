@@ -1,10 +1,13 @@
 #pragma once
 
-#pragma once
-
+#include "IPAddress.h"
+#include "Stream.h"
+#include "WString.h"
+#include <chrono>
+#include <random>
 #include <stddef.h>
 #include <stdint.h>
-#include <string>
+#include <thread>
 
 #define HIGH 1
 #define LOW 0
@@ -15,8 +18,31 @@
 #define LSBFIRST 0
 #define MSBFIRST 1
 
-using String = std::string;
 using byte = uint8_t;
+using boolean = bool;
+inline unsigned long millis() {
+  static const auto start = std::chrono::steady_clock::now();
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - start)
+      .count();
+}
+inline unsigned long micros() {
+  static const auto start = std::chrono::steady_clock::now();
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now() - start)
+      .count();
+}
+inline void yield() {
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+inline uint32_t mockRandom32() {
+  thread_local std::random_device source;
+  return source();
+}
+#define RANDOM_REG32 mockRandom32()
+#ifndef DEBUGV
+#define DEBUGV(...) ((void)0)
+#endif
 
 void pinMode(unsigned pin, int mode);
 void digitalWrite(unsigned pin, int value);
@@ -25,31 +51,21 @@ void delay(unsigned long ms);
 
 // Serial
 
-class MockSerial {
+class MockSerial : public Stream {
 public:
   void begin(unsigned long baud);
-  int available();
-  int read();
-  size_t write(uint8_t byte);
+  int available() override;
+  int read() override;
+  int peek() override;
+  size_t write(uint8_t byte) override;
+  using Print::write;
+  using Stream::read;
   void reset();
 };
 
 extern MockSerial Serial;
 
 // IPAddress
-
-class IPAddress {
-public:
-  IPAddress() = default;
-  IPAddress(uint8_t a, uint8_t b, uint8_t c, uint8_t d) : bytes_{a, b, c, d} {}
-
-  uint8_t operator[](int index) const { return bytes_[index]; }
-
-  String toString() const;
-
-private:
-  uint8_t bytes_[4]{};
-};
 
 // WiFi
 
@@ -76,7 +92,7 @@ typedef enum {
 #define WIFI_SCAN_FAILED (-2)
 
 class ESP8266WiFiClass {
-  WiFiMode_t _mode;
+  WiFiMode_t _mode = WIFI_OFF;
 
 public:
   // Generic
@@ -86,6 +102,7 @@ public:
   bool enableSTA(bool enabled);
   bool enableAP(bool enabled);
   uint8_t channel();
+  int hostByName(const char *host, IPAddress &ip, uint32_t timeout_ms = 10000);
 
   // Station
   wl_status_t begin(const char *ssid, const char *passphrase = nullptr,

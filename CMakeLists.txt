@@ -77,15 +77,45 @@ else()
     add_executable(boardstate-daemon boardstate-daemon/boardstate.cpp)
     target_link_libraries(boardstate-daemon PRIVATE fdt)
 
-    add_library(esp-mock-sdk STATIC mock-esp8266-sdk/Arduino.cpp)
-    target_include_directories(esp-mock-sdk PUBLIC mock-esp8266-sdk)
-    target_link_libraries(esp-mock-sdk PUBLIC boardstate-client)
-
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(NETWORK_MANAGER_LIB REQUIRED IMPORTED_TARGET libnm)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+    find_package(Threads REQUIRED)
+    add_library(esp-mock-sdk STATIC
+        mock-esp8266-sdk/Arduino.cpp
+        mock-esp8266-sdk/Wlan.cpp
+        mock-esp8266-sdk/IPAddress.cpp
+        mock-esp8266-sdk/Stream.cpp
+        mock-esp8266-sdk/Sockets.cpp
+        mock-esp8266-sdk/FS.cpp
+        mock-esp8266-sdk/Crypto.cpp
+        mock-esp8266-sdk/vendor/ESP8266WebServer/detail/mimetable.cpp)
+    target_compile_features(esp-mock-sdk PUBLIC cxx_std_17)
+    target_include_directories(esp-mock-sdk PUBLIC mock-esp8266-sdk
+        mock-esp8266-sdk/vendor/ESP8266WebServer)
+    target_link_libraries(esp-mock-sdk PUBLIC boardstate-client
+        PkgConfig::NETWORK_MANAGER_LIB OpenSSL::Crypto Threads::Threads)
+    option(MOCK_NETWORK_SANITIZERS "Enable ASan/UBSan for the ESP host SDK" OFF)
+    if(MOCK_NETWORK_SANITIZERS)
+        target_compile_options(esp-mock-sdk PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(esp-mock-sdk PUBLIC -fsanitize=address,undefined)
+    endif()
+    include(CTest)
+    if(BUILD_TESTING)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_executable(esp-network-test tests/esp-network.cpp)
+        target_link_libraries(esp-network-test PRIVATE esp-mock-sdk)
+        foreach(case support tcp pending peek-fragments ownership pressure udp multicast broadcast descriptors descriptor-zero reset)
+            add_test(NAME esp-network-${case} COMMAND esp-network-test ${case})
+            set_tests_properties(esp-network-${case} PROPERTIES TIMEOUT 15)
+        endforeach()
+        add_test(NAME esp-network-http COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test-esp-http.py $<TARGET_FILE:esp-network-test>)
+        set_tests_properties(esp-network-http PROPERTIES TIMEOUT 60)
+    endif()
     set_source_files_properties(esp8266/esp8266.ino PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
-    add_executable(esp8266-mock mock-esp8266-sdk/main.cpp mock-esp8266-sdk/Wlan.cpp esp8266/esp8266.ino)
-    target_link_libraries(esp8266-mock PRIVATE esp-mock-sdk PkgConfig::NETWORK_MANAGER_LIB)
+    add_executable(esp8266-mock mock-esp8266-sdk/main.cpp esp8266/esp8266.ino)
+    target_link_libraries(esp8266-mock PRIVATE esp-mock-sdk)
     add_executable(esp-restart-probe mock-esp8266-sdk/main.cpp tests/esp-restart-probe.cpp)
     target_link_libraries(esp-restart-probe PRIVATE esp-mock-sdk)
     add_executable(boardstate-pico-smoke tests/boardstate-pico-smoke.c)
@@ -96,7 +126,10 @@ else()
         ${TINYLINUX_SOURCES} drivers/fakenorflash.cpp)
     target_compile_definitions(boardstate-wlan-host PRIVATE MOCK_HARDWARE)
     target_link_libraries(boardstate-wlan-host PRIVATE pico-mock-sdk fdt)
-    target_link_options(boardstate-wlan-host PRIVATE -T ${CMAKE_SOURCE_DIR}/driver.lds)
+    target_link_options(boardstate-wlan-host PRIVATE
+        "LINKER:--script=${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
+    set_property(TARGET boardstate-wlan-host APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
 
     add_executable(pico_serprog main.c ${TINYLINUX_SOURCES} drivers/fakenorflash.cpp)
     target_link_libraries(pico_serprog PRIVATE pico-mock-sdk fdt boardstate-client)
@@ -105,7 +138,12 @@ else()
     #target_compile_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
     #target_link_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
 endif()
-target_link_options(pico_serprog PRIVATE ${CMAKE_EXE_LINKER_FLAGS} -T ${CMAKE_SOURCE_DIR}/driver.lds)
+# GCC defers a bare -T until after -Wl options, reversing the order relative to
+# the SDK's memory-map script. INSERT scripts must precede that full script.
+target_link_options(pico_serprog PRIVATE
+    "LINKER:--script=${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
+set_property(TARGET pico_serprog APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
 
 find_program(DTC dtc REQUIRED)
 

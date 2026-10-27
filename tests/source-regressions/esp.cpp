@@ -9,6 +9,7 @@ MockSerial Serial;
 void MockSerial::begin(unsigned long) {}
 void MockSerial::reset() { input.clear(); }
 int MockSerial::available() { return !input.empty(); }
+int MockSerial::peek() { return input.empty() ? -1 : input.front(); }
 int MockSerial::read() {
   if (input.empty()) return -1;
   int value = input.front(); input.pop_front(); return value;

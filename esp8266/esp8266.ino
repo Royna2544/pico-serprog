@@ -1,6 +1,7 @@
 
 #include "wlantalk.h"
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
 #include <stdarg.h>
 #include <string.h>
 

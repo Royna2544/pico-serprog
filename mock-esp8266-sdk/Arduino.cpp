@@ -48,6 +48,9 @@ int MockSerial::read() {
   cached_byte = -1;
   return byte;
 }
+int MockSerial::peek() {
+  return available() ? cached_byte : -1;
+}
 size_t MockSerial::write(uint8_t byte) {
   checked(board_uart("esp", "TX", byte));
   return 1;
