@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo apt-get update
-      - run: sudo apt-get install -y gcc-arm-none-eabi cmake
+      - run: sudo apt-get install -y gcc-arm-none-eabi cmake device-tree-compiler
       - uses: actions/checkout@v3
       - run: git clone -b 1.5.0 https://github.com/raspberrypi/pico-sdk
       - run: cd pico-sdk && git submodule update --init lib/tinyusb
