@@ -96,7 +96,10 @@ else()
         ${TINYLINUX_SOURCES} drivers/fakenorflash.cpp)
     target_compile_definitions(boardstate-wlan-host PRIVATE MOCK_HARDWARE)
     target_link_libraries(boardstate-wlan-host PRIVATE pico-mock-sdk fdt)
-    target_link_options(boardstate-wlan-host PRIVATE -T ${CMAKE_SOURCE_DIR}/driver.lds)
+    target_link_options(boardstate-wlan-host PRIVATE
+        "LINKER:--script=${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
+    set_property(TARGET boardstate-wlan-host APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
 
     add_executable(pico_serprog main.c ${TINYLINUX_SOURCES} drivers/fakenorflash.cpp)
     target_link_libraries(pico_serprog PRIVATE pico-mock-sdk fdt boardstate-client)
@@ -105,7 +108,12 @@ else()
     #target_compile_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
     #target_link_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
 endif()
-target_link_options(pico_serprog PRIVATE ${CMAKE_EXE_LINKER_FLAGS} -T ${CMAKE_SOURCE_DIR}/driver.lds)
+# GCC defers a bare -T until after -Wl options, reversing the order relative to
+# the SDK's memory-map script. INSERT scripts must precede that full script.
+target_link_options(pico_serprog PRIVATE
+    "LINKER:--script=${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
+set_property(TARGET pico_serprog APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/driver.lds")
 
 find_program(DTC dtc REQUIRED)
 
