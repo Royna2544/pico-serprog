@@ -44,6 +44,9 @@
 #define DBGWS(x...) do { (void)0; } while (0)
 #endif
 
+#undef DBGWS
+#define DBGWS(f,...) do { printf(PSTR(f), ##__VA_ARGS__); } while (0)
+
 enum HTTPMethod { HTTP_ANY, HTTP_GET, HTTP_HEAD, HTTP_POST, HTTP_PUT, HTTP_PATCH, HTTP_DELETE, HTTP_OPTIONS };
 enum HTTPUploadStatus { UPLOAD_FILE_START, UPLOAD_FILE_WRITE, UPLOAD_FILE_END,
                         UPLOAD_FILE_ABORTED };

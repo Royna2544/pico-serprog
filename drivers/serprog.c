@@ -11,11 +11,14 @@
 #define SPI_MAX_LEN 4096u
 #define SPI_CHUNK_SIZE 256u
 #define SERIAL_BUFFER_SIZE 64u
+static uint8_t spi_send_buffer[SPI_MAX_LEN];
+static uint8_t spi_recv_buffer[SPI_MAX_LEN];
 
 struct serprog_platform_data {
   const struct device *usb_cdc;
   const struct device *spi_chip;
-  const struct device *spi_master;
+  spi_transfer_callback_t spi_transfer_callback;
+  serprog_command_callback_t serprog_command_callback;
 };
 
 static int serprogdrv_probe(struct device *dev) {
@@ -47,7 +50,6 @@ static int serprogdrv_probe(struct device *dev) {
   }
   pdata->usb_cdc = usb_cdc;
   pdata->spi_chip = spi_dev;
-  pdata->spi_master = spi_dev->parent;
   dev->platform_data = pdata;
   return 0;
 }
@@ -56,6 +58,28 @@ static void serprogdrv_remove(struct device *dev) {
   dev_info(dev, "Removing serprog driver");
   free(dev->platform_data);
   dev->platform_data = NULL;
+}
+
+static void
+serprogdrv_register_xfer_callback(const struct device *dev,
+                                  spi_transfer_callback_t callback) {
+  struct serprog_platform_data *pdata = dev->platform_data;
+  if (!pdata) {
+    dev_err(dev, "No platform data for serprog driver");
+    return;
+  }
+  pdata->spi_transfer_callback = callback;
+}
+
+static void
+serprogdrv_register_serprog_cmd_callback(const struct device *dev,
+                                         serprog_command_callback_t callback) {
+  struct serprog_platform_data *pdata = dev->platform_data;
+  if (!pdata) {
+    dev_err(dev, "No platform data for serprog driver");
+    return;
+  }
+  pdata->serprog_command_callback = callback;
 }
 
 static uint32_t get_le(const uint8_t *bytes, unsigned count) {
@@ -99,31 +123,17 @@ static void handle_spi(const struct serprog_platform_data *pdata) {
     return;
   }
 
-  uint8_t *reply = rlen ? malloc(rlen) : NULL;
-  if (rlen && !reply) {
-    if (discard_bytes(cdc, slen))
-      usb_cdc_write_byte(cdc, S_NAK);
-    return;
-  }
-
-  uint8_t *send = slen ? malloc(slen) : NULL;
-  if (slen && !send) {
-    free(reply);
-    if (discard_bytes(cdc, slen))
-      usb_cdc_write_byte(cdc, S_NAK);
-    return;
-  }
+  uint8_t *send = (slen ? spi_send_buffer : NULL);
+  uint8_t *reply = (rlen ? spi_recv_buffer : NULL);
   if (slen && usb_cdc_read_bytes(cdc, send, slen) != slen) {
-    free(send);
-    free(reply);
     return;
   }
 
   bool ok = spi_chip_assert_cs(pdata->spi_chip) == 0;
   for (uint32_t pos = 0; pos < slen;) {
     uint32_t chunk = slen - pos < SPI_CHUNK_SIZE ? slen - pos : SPI_CHUNK_SIZE;
-    if (ok && spi_master_write_nbytes(pdata->spi_master, send + pos, chunk) !=
-                  (int)chunk)
+    if (ok &&
+        spi_chip_write_nbytes(pdata->spi_chip, send + pos, chunk) != (int)chunk)
       ok = false;
     pos += chunk;
   }
@@ -131,7 +141,7 @@ static void handle_spi(const struct serprog_platform_data *pdata) {
     for (uint32_t pos = 0; pos < rlen;) {
       uint32_t chunk =
           rlen - pos < SPI_CHUNK_SIZE ? rlen - pos : SPI_CHUNK_SIZE;
-      if (spi_master_read_nbytes(pdata->spi_master, reply + pos, chunk) !=
+      if (spi_chip_read_nbytes(pdata->spi_chip, reply + pos, chunk) !=
           (int)chunk) {
         ok = false;
         break;
@@ -142,11 +152,12 @@ static void handle_spi(const struct serprog_platform_data *pdata) {
   if (spi_chip_deassert_cs(pdata->spi_chip) != 0)
     ok = false;
 
+  if (pdata->spi_transfer_callback)
+    pdata->spi_transfer_callback(pdata->spi_chip, send, slen, reply, rlen);
+
   usb_cdc_write_byte(cdc, ok ? S_ACK : S_NAK);
   if (ok && rlen)
     usb_cdc_write_bytes(cdc, reply, rlen);
-  free(send);
-  free(reply);
 }
 
 static void serprogdrv_handle_command(const struct device *dev) {
@@ -219,12 +230,12 @@ static void serprogdrv_handle_command(const struct device *dev) {
     if (usb_cdc_read_bytes(cdc, bytes, sizeof(bytes)) != sizeof(bytes))
       break;
     uint32_t want = get_le(bytes, 4);
-    if (!want || spi_master_set_baud(pdata->spi_master, want) != 0) {
+    if (!want || spi_chip_set_baud(pdata->spi_chip, want) != 0) {
       usb_cdc_write_byte(cdc, S_NAK);
       break;
     }
     /* set_baud returns status, not the actual frequency. Read hardware back. */
-    uint32_t actual = spi_master_get_baud(pdata->spi_master);
+    uint32_t actual = spi_chip_get_baud(pdata->spi_chip);
     if (!actual) {
       usb_cdc_write_byte(cdc, S_NAK);
       break;
@@ -282,6 +293,9 @@ static void serprogdrv_handle_command(const struct device *dev) {
     break;
   }
   usb_cdc_write_flush(cdc);
+
+  if (pdata->serprog_command_callback)
+    pdata->serprog_command_callback(dev, cmd);
 }
 
 static const struct driver_fdt_match_id serprog_driver_ids[] = {
@@ -298,6 +312,8 @@ static struct serprog_driver serprog_driver = {
             .match_table = serprog_driver_ids,
         },
     .handle_command = serprogdrv_handle_command,
+    .register_xfer_callback = serprogdrv_register_xfer_callback,
+    .register_serprog_cmd_callback = serprogdrv_register_serprog_cmd_callback,
 };
 
 PLATFORM_DRIVER(serprog_driver);
@@ -312,4 +328,24 @@ void serprogdrv_process_commands(const struct device *dev) {
   while (1) {
     serprogdrv_handle_command(dev);
   }
+}
+
+void serprogdrv_set_spi_transfer_callback(const struct device *dev,
+                                          spi_transfer_callback_t callback) {
+  struct serprog_platform_data *pdata = dev->platform_data;
+  if (!pdata) {
+    dev_err(dev, "No platform data for serprog driver");
+    return;
+  }
+  pdata->spi_transfer_callback = callback;
+}
+
+void serprogdrv_set_command_callback(const struct device *dev,
+                                     serprog_command_callback_t callback) {
+  struct serprog_platform_data *pdata = dev->platform_data;
+  if (!pdata) {
+    dev_err(dev, "No platform data for serprog driver");
+    return;
+  }
+  pdata->serprog_command_callback = callback;
 }

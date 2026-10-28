@@ -3,6 +3,7 @@
 #include "core/devicetree.h"
 #include "core/init.h"
 #include "core/irq.h"
+#include "drivers/latched-switch.h"
 #include <drivers/uartdrv.h>
 #include <hardware/gpio.h>
 #include <hardware/sync.h>
@@ -10,11 +11,19 @@
 #include <string.h>
 #include <sys/errno.h>
 
-#define ESP8266_EN 18
-#define ESP8266_RST 19
-#define ESP8266_GPIO0 20
-#define ESP8266_GPIO2 21
-#define ESP8266_GPIO15 22
+#include <drivers/gpiolib.h>
+
+struct esp8266_platform_data {
+  struct gpio_desc *en_pin;
+  struct gpio_desc *rst_pin;
+  struct gpio_desc *gpio0_pin;
+  struct gpio_desc *gpio2_pin;
+  struct gpio_desc *gpio15_pin;
+  int bootpin_irq;
+  bool autoboot_enabled;
+
+  enum wlan_driver_boot_mode cur_boot_mode;
+};
 
 static volatile bool esp8266_ready = false;
 
@@ -33,8 +42,35 @@ static irqreturn_t callback(int virq, irq_event_t events, void *data) {
 
 static int esp8266_boot(struct device *dev, enum wlan_driver_boot_mode mode);
 
+static void esp8266_bootsource_change_callback(void *data, bool new_state) {
+  struct device *dev = (struct device *)data;
+  struct esp8266_platform_data *pdata = dev->platform_data;
+  if (!pdata) {
+    dev_err(dev, "Platform data is NULL");
+    return;
+  }
+
+  enum wlan_driver_boot_mode new_mode =
+      new_state ? WLAN_BOOT_NORMAL : WLAN_BOOT_UPLOAD;
+
+  if (new_mode != pdata->cur_boot_mode) {
+    dev_info(dev, "Boot source changed, reinitializing ESP8266 to mode: %d",
+             new_mode);
+    int rc = esp8266_boot(dev, WLAN_BOOT_NONE);
+    if (rc) {
+      dev_err(dev, "Failed to reinitialize ESP8266 to NONE mode");
+      return;
+    }
+    rc = esp8266_boot(dev, new_mode);
+    if (rc) {
+      dev_err(dev, "Failed to reinitialize ESP8266 to mode: %d", new_mode);
+    }
+  }
+}
+
 static int esp8266_probe(struct device *dev) {
   struct esp8266_platform_data *pdata = calloc(1, sizeof(*pdata));
+  int rc;
   if (!pdata) {
     dev_err(dev, "Platform data is NULL");
     return -ENOMEM;
@@ -49,9 +85,10 @@ static int esp8266_probe(struct device *dev) {
       gpio_request_irq(dev, dev, dev->fdt_node_offset, "interrupts-extended");
   if (irq < 0) {
     dev_err(dev, "Failed to request IRQ for ESP8266: %d", irq);
-    free(pdata);
-    return irq;
+    rc = irq;
+    goto free_pdata;
   }
+
   pdata->bootpin_irq = irq;
   dev_info(dev, "ESP8266 GPIO IRQ requested successfully. IRQ: %d", irq);
   pdata->en_pin = gpio_request(dev, dev->fdt_node_offset, "enable-gpios");
@@ -65,24 +102,66 @@ static int esp8266_probe(struct device *dev) {
   if (!pdata->en_pin || !pdata->rst_pin || !pdata->gpio0_pin ||
       !pdata->gpio2_pin || !pdata->gpio15_pin) {
     dev_err(dev, "Failed to request GPIOs for ESP8266");
-    gpio_desc_release(dev, pdata->en_pin);
-    gpio_desc_release(dev, pdata->rst_pin);
-    gpio_desc_release(dev, pdata->gpio0_pin);
-    gpio_desc_release(dev, pdata->gpio2_pin);
-    gpio_desc_release(dev, pdata->gpio15_pin);
-    free(pdata);
-    return -EINVAL;
+    rc = -ENODEV;
+    goto release_gpios;
   }
+
+  rc = get_prop_bool_default(dev, "autoboot", &pdata->autoboot_enabled, false);
+  if (rc) {
+    goto release_gpios;
+  }
+  dev_info(dev, "ESP8266 autoboot is %s",
+           pdata->autoboot_enabled ? "enabled" : "disabled");
   dev->platform_data = pdata;
 
   if (esp8266_boot(dev, WLAN_BOOT_NONE)) {
     dev_err(dev, "Failed to initialize ESP8266 in NONE mode");
-    return -EIO;
+    rc = -EINVAL;
+    goto release_gpios;
   }
-  pdata->cur_boot_mode = WLAN_BOOT_NONE;
+
+  if (pdata->autoboot_enabled) {
+    struct device *bootmode_source =
+        find_device_by_prop(dev, "bootmode-source", dev->fdt_node_offset, 0);
+    if (!bootmode_source) {
+      dev_err(dev, "Failed to find bootmode-source device");
+      rc = EPROBE_DEFER;
+      goto release_gpios;
+    }
+    bool switch_state;
+    rc = latched_switch_get_state(bootmode_source, &switch_state);
+    if (rc != 0) {
+      dev_err(dev, "Failed to get latched switch state");
+      goto release_gpios;
+    }
+    enum wlan_driver_boot_mode bootmode =
+        switch_state ? WLAN_BOOT_NORMAL : WLAN_BOOT_UPLOAD;
+    if (esp8266_boot(dev, bootmode)) {
+      dev_err(dev, "Failed to initialize ESP8266 in mode: %d",
+              pdata->cur_boot_mode);
+      rc = -EINVAL;
+      goto release_gpios;
+    }
+    rc = latched_switch_set_on_change_callback(
+        bootmode_source, esp8266_bootsource_change_callback, dev);
+    if (rc != 0) {
+      dev_err(dev, "Failed to set latched switch on-change callback");
+      goto release_gpios;
+    }
+  }
 
   dev_info(dev, "ESP8266 probed successfully.");
   return 0;
+release_gpios:
+  devm_free_irq(dev, pdata->bootpin_irq);
+  gpio_desc_release(dev, pdata->en_pin);
+  gpio_desc_release(dev, pdata->rst_pin);
+  gpio_desc_release(dev, pdata->gpio0_pin);
+  gpio_desc_release(dev, pdata->gpio2_pin);
+  gpio_desc_release(dev, pdata->gpio15_pin);
+free_pdata:
+  free(pdata);
+  return rc;
 }
 
 static int esp8266_boot(struct device *dev, enum wlan_driver_boot_mode mode) {

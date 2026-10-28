@@ -1,4 +1,3 @@
-/dts-v1/;
 
 / {
     model = "Raspberry Pi Pico SPI NOR Flasher";
@@ -17,6 +16,8 @@
         serprog0 = &serprog0;
         passthru0 = &passthru0;
         led0 = &led0;
+        pwrok0 = &pwrok0;
+        switch0 = &switch0;
     };
 
     chosen {
@@ -47,6 +48,21 @@
             spi0_default: spi0-default {
                 pins = "gpio2", "gpio3", "gpio4"; // SCK MOSI MISO
                 function = "spi";
+            };
+
+            spi1_default: spi1-default {
+                pins = "gpio14", "gpio15", "gpio16"; // SCK MOSI MISO
+                function = "spi";
+            };
+
+            i2c0_default: i2c0-default {
+                pins = "gpio16", "gpio17"; // SDA SCL
+                function = "i2c";
+            };
+
+            i2c1_default: i2c1-default {
+                pins = "gpio10", "gpio11"; // SDA SCL
+                function = "i2c";
             };
         };
 
@@ -82,9 +98,24 @@
                 reg = <0>;
                 default-baud = <10000000>;
                 cs-gpio = <&gpio0 5 1>;
+                empty-tx-byte = <0x00>;
 
                 status = "okay";
             };
+        };
+        
+        spi1: spi@40040000 {
+            compatible = "raspberrypi,rp2040-spi-master";
+            reg = <0x40040000 0x4000>;
+
+            pinctrl-names = "default";
+            pinctrl-0 = <&spi1_default>;
+            default-baud = <10000000>;
+
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            status = "disabled";
         };
 
         uart0: serial@40034000 {
@@ -123,8 +154,43 @@
 
                 // HIGH=4 LOW=8 FALLING=2 RISING=1
                 interrupts-extended = <&gpio0 22 1>;
+
+                bootmode-source = <&switch0>;
+                autoboot = <1>;
+
                 status = "okay";
             };
+        };
+
+        i2c0: i2c@40044000 {
+            compatible = "raspberrypi,rp2040-i2c-controller";
+            reg = <0x40044000 0x0100>;
+
+            pinctrl-names = "default";
+            pinctrl-0 = <&i2c0_default>;
+
+            initial-clock-frequency = <400000>; // 400kHz
+
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            display_i2c: display@27 {
+                compatible = "raspberrypi,rp2040-i2c-device";
+                reg = <0x27>;
+            };
+        };
+
+        i2c1: i2c@40048000 {
+            compatible = "raspberrypi,rp2040-i2c-controller";
+            reg = <0x40048000 0x0100>;
+
+            pinctrl-names = "default";
+            pinctrl-0 = <&i2c1_default>;
+
+            initial-clock-frequency = <400000>; // 400kHz
+
+            #address-cells = <1>;
+            #size-cells = <0>;
         };
 
         usb0: usb@50110000 {
@@ -144,6 +210,33 @@
         led0: led-0 {
             gpios = <&gpio0 25 0>;
             default-state = "off";
+        };
+    };
+
+    switch0: esp-bootmode-switch {
+        compatible = "royna,latched-switch";
+
+        gpios = <&gpio0 15 1>;
+        // Mode 0=External 1=Need internal pullup 2=Need internal pulldown
+        mode = <0>;
+        // HIGH=4 LOW=8 FALLING=2 RISING=1
+        interrupts-extended = <&gpio0 15 3>;
+    };
+
+    // Level shifter: used by display i2c's 5v logic shift.
+    // When GP9 is pulled LOW (from default pullup), we put GP19
+    // (Logic shifter's OE) HIGH to enable i2c voltage translation.
+    // Only then, the display can be ready.
+    pwrok0: signal-action-gpio {
+        compatible = "royna,signal-action-gpio";
+
+        trig-gpios = <&gpio0 6 1>;
+        echo-gpios = <&gpio0 14 0>;
+        interrupts-extended = <&gpio0 6 3>; // FALLING/RISING
+
+        display0: display {
+            compatible = "nxp,pcf8574t";
+            i2c-dev = <&display_i2c>;
         };
     };
 
@@ -175,13 +268,13 @@
             };
         };
 
-        serprog1: serprog {
+        serprog0: serprog {
             compatible = "royna,serprog";
 
             spi-chip = <&flash>;
             usb-cdc = <&cdc0>;
 
-            status = "disabled";
+            status = "okay";
         };
 
         passthru0: passthru {
@@ -190,36 +283,5 @@
             usb-cdc = <&cdc2>;
             uart = <&uart1>;
         };
-    };
-};
-
-&soc0 {
-    spifake: spi@190 {
-        compatible = "fake,spi-master";
-        reg = <0x190 0x4000>;
-        status = "okay";
-
-        #address-cells = <1>;
-        #size-cells = <0>;
-
-        default-baud = <10000000>;
-
-        flashfake: flash@20 {
-            compatible = "fake,spi-chip";
-            reg = <32>;
-
-            status = "okay";
-        };
-    };
-};
-
-&fw {
-    serprog0: serprog-fake {
-        compatible = "royna,serprog";
-
-        spi-chip = <&flashfake>;
-        usb-cdc = <&cdc0>;
-
-        status = "okay";
     };
 };

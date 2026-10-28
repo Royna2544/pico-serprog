@@ -172,7 +172,7 @@ int gpiochip_register(struct device *dev, const char *name, void *drv_data,
     pr_err("GPIO: Invalid parameters for gpiochip_register");
     return -EINVAL;
   }
-  if (!has_property(dev->fdt_node_offset, "gpio-controller")) {
+  if (!has_property(dev, dev->fdt_node_offset, "gpio-controller")) {
     dev_err(dev, "%s: Device %s is not a GPIO controller", __func__, dev->name);
     return -ENODEV;
   }

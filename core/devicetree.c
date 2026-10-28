@@ -152,7 +152,8 @@ static int devicetree_init() {
 }
 driver_initcall(devicetree_init);
 
-bool has_property(int node_offset, const char *property_name) {
+bool has_property(struct device *dev, int node_offset,
+                  const char *property_name) {
   const struct fdt_property *prop =
       fdt_get_property(board_dtb_start, node_offset, property_name, NULL);
   return prop != NULL;
@@ -589,6 +590,28 @@ int get_prop_int32(struct device *dev, const char *prop_name, int *out_value) {
 int get_prop_int32_default(struct device *dev, const char *prop_name,
                            int *out_value, int default_value) {
   int ret = get_prop_int32(dev, prop_name, out_value);
+  if (ret == -ENOENT) {
+    dev_dbg(dev, "Property %s for device %s not found, using default value",
+            prop_name, dev->name);
+    *out_value = default_value;
+    ret = 0; // Return 0 to indicate that we used the default value
+  }
+  return ret;
+}
+
+int get_prop_bool(struct device *dev, const char *prop_name, bool *out_value) {
+  int value;
+  int ret = get_prop_int32(dev, prop_name, &value);
+  if (ret < 0) {
+    return ret;
+  }
+  *out_value = (value != 0);
+  return 0;
+}
+
+int get_prop_bool_default(struct device *dev, const char *prop_name,
+                          bool *out_value, bool default_value) {
+  int ret = get_prop_bool(dev, prop_name, out_value);
   if (ret == -ENOENT) {
     dev_dbg(dev, "Property %s for device %s not found, using default value",
             prop_name, dev->name);

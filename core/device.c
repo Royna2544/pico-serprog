@@ -33,7 +33,7 @@ bool device_register(struct device *dev) {
   }
 
   // Check interrupts-extended if the node wants irq.
-  if (has_property(dev->fdt_node_offset, "interrupts-extended")) {
+  if (has_property(dev, dev->fdt_node_offset, "interrupts-extended")) {
     struct device *irq_dev = find_device_by_prop(dev, "interrupts-extended",
                                                  dev->fdt_node_offset, 0);
     if (!irq_dev) {
@@ -68,7 +68,8 @@ bool device_register(struct device *dev) {
     irq_event_t event;
 
     if (!domain->ops || !domain->ops->xlate || !domain->ops->map) {
-      pr_err("OF: IRQ domain for device %s has incomplete operations", dev->name);
+      pr_err("OF: IRQ domain for device %s has incomplete operations",
+             dev->name);
       rc = -EINVAL;
       goto skip_probe;
     }
@@ -202,8 +203,9 @@ bool driver_register(struct driver *drv) {
   return true;
 }
 
-static const struct driver *driver_find_match(
-    const char *compatible, const struct driver_fdt_match_id **matched) {
+static const struct driver *
+driver_find_match(const char *compatible,
+                  const struct driver_fdt_match_id **matched) {
   if (!compatible)
     return NULL;
 
@@ -232,7 +234,8 @@ const struct driver *driver_find_for_device(struct device *dev) {
   const struct driver *drv = NULL;
   dev->driver_data = NULL;
   int count = dev->fdt ? fdt_stringlist_count(dev->fdt, dev->fdt_node_offset,
-                                             "compatible") : 0;
+                                              "compatible")
+                       : 0;
   if (count > 0) {
     // Device-tree compatible strings are ordered from specific to general.
     for (int i = 0; i < count && !drv; i++) {

@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+struct SDCard;
+
 namespace fs {
 enum SeekMode { SeekSet, SeekCur, SeekEnd };
 class FS;
@@ -17,6 +19,7 @@ class File : public Stream {
               }),
         name_(std::move(name)) {}
   friend class FS;
+  friend struct ::SDCard;
 
 public:
   File() = default;
@@ -63,9 +66,3 @@ public:
   bool rename(const char *from, const char *to);
 };
 } // namespace fs
-using fs::File;
-using fs::FS;
-using fs::SeekCur;
-using fs::SeekEnd;
-using fs::SeekMode;
-using fs::SeekSet;

@@ -1,0 +1,47 @@
+/dts-v1/;
+
+/include/ "common.dtsi"
+
+&{/aliases} {
+    serprogfake1 = &serprogfake1;
+};
+
+&soc0 {
+    spifake: spi@190 {
+        compatible = "fake,spi-master";
+        reg = <0x190 0x4000>;
+        status = "okay";
+
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        default-baud = <10000000>;
+
+        flashfake: flash@20 {
+            compatible = "fake,spi-chip";
+            reg = <32>;
+
+            status = "okay";
+        };
+    };
+
+};
+
+&spi0 {
+    status = "disabled";
+};
+
+&fw {
+    serprogfake1: serprog-fake {
+        compatible = "royna,serprog";
+
+        spi-chip = <&flashfake>;
+        usb-cdc = <&cdc0>;
+
+        status = "okay";
+    };
+};
+
+&serprog0 {
+    status = "disabled";
+};

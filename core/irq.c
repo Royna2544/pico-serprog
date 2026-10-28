@@ -89,8 +89,8 @@ void devm_free_irq(struct device *dev, int irq) {
         domain->chip->disable(domain->chip, data);
         list_del(&node->list);
         free(node);
-        dev_dbg(dev, "Freeing IRQ %d for device %s, refcount %d", irq, dev->name,
-                domain->chip->refcount);
+        dev_dbg(dev, "Freeing IRQ %d for device %s, refcount %d", irq,
+                dev->name, domain->chip->refcount);
         if (domain->chip->refcount == 1) {
           domain->chip->exit(domain->chip);
         }
@@ -241,7 +241,18 @@ int generic_irq_handle(struct irq_domain *domain, int virq, irq_event_t event) {
             dev_dbg(domain->master, "IRQ %d handled successfully", virq);
             return 0;
           case IRQ_NONE:
-            dev_dbg(domain->master, "IRQ %d was not handled", virq);
+            // The driver was unable to handle, disable the IRQ to prevent
+            // further spurious interrupts. Especially important for
+            // level-triggered interrupts, as the line may remain asserted.
+            // Since the driver cannot handle it,
+            // we assume it's a hardware issue or misconfiguration.
+            if (chip && chip->disable &&
+                (event == IRQ_EVENT_HIGH_LEVEL ||
+                 event == IRQ_EVENT_LOW_LEVEL)) {
+              dev_err(domain->master, "IRQ %d was not handled, disabling it",
+                      virq);
+              chip->disable(chip, data);
+            }
             return -ENOENT;
           default:
             dev_err(domain->master, "IRQ %d handler returned unknown value",

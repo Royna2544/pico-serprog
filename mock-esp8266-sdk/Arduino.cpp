@@ -1,16 +1,18 @@
 #include "Arduino.h"
+#include "SPI.h"
 #include "boardstate-daemon/client.h"
 
 #include <cerrno>
+#include <chrono>
 #include <stdexcept>
 #include <thread>
-#include <chrono>
 
 MockSerial Serial;
 static int cached_byte = -1;
 
 static void checked(int result) {
-  if (result < 0) throw std::runtime_error("boardstate socket operation failed");
+  if (result < 0)
+    throw std::runtime_error("boardstate socket operation failed");
 }
 
 void pinMode(unsigned pin, int mode) {
@@ -36,21 +38,22 @@ void MockSerial::begin(unsigned long) {
 }
 void MockSerial::reset() { cached_byte = -1; }
 int MockSerial::available() {
-  if (cached_byte >= 0) return 1;
+  if (cached_byte >= 0)
+    return 1;
   errno = 0;
   cached_byte = board_uart("esp", "RX", -1);
-  if (cached_byte < 0 && errno) checked(-1);
+  if (cached_byte < 0 && errno)
+    checked(-1);
   return cached_byte >= 0 ? 1 : 0;
 }
 int MockSerial::read() {
-  if (!available()) return -1;
+  if (!available())
+    return -1;
   int byte = cached_byte;
   cached_byte = -1;
   return byte;
 }
-int MockSerial::peek() {
-  return available() ? cached_byte : -1;
-}
+int MockSerial::peek() { return available() ? cached_byte : -1; }
 size_t MockSerial::write(uint8_t byte) {
   checked(board_uart("esp", "TX", byte));
   return 1;

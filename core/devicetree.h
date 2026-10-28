@@ -6,7 +6,8 @@
 struct gpio_desc;
 
 extern const char *hardware_model;
-bool has_property(int node_offset, const char *property_name);
+bool has_property(struct device *dev, int node_offset,
+                  const char *property_name);
 
 int apply_pinctrl_default(const struct device *dev);
 int remove_pinctrl_default(const struct device *dev);
@@ -36,6 +37,9 @@ unsigned int get_prop_uint32(struct device *dev, const char *prop_name,
 unsigned int get_prop_uint32_default(struct device *dev, const char *prop_name,
                                      unsigned int *out_value,
                                      unsigned int default_value);
+int get_prop_bool(struct device *dev, const char *prop_name, bool *out_value);
+int get_prop_bool_default(struct device *dev, const char *prop_name,
+                          bool *out_value, bool default_value);
 int get_prop_int32_array(struct device *dev, const char *prop_name,
                          int *out_values, int array_size);
 bool has_prop(struct device *dev, const char *prop_name);

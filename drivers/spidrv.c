@@ -19,21 +19,27 @@ struct spi_chip_platform_data {
   unsigned int default_baud;
   unsigned int saved_baud;
   bool asserted;
+  uint8_t empty_tx_byte;
 };
 
-static void spidrv_master_set_baud(const struct device *dev, uint32_t baud) {
+static int spidrv_master_set_baud(const struct device *dev, uint32_t baud) {
   struct spi_master_platform_data *pdata = dev->platform_data;
   if (pdata->current_baud == baud) {
-    return;
+    return 0;
   }
   pdata->current_baud = spi_set_baudrate(pdata->hw, baud);
   dev_dbg(dev, "%s: set baud to %u: accepted %u", __func__, baud,
           pdata->current_baud);
+  return 0;
 }
 
-static uint32_t spidrv_master_get_baud(const struct device *dev) {
+static int spidrv_master_get_baud(const struct device *dev, uint32_t *baud) {
   struct spi_master_platform_data *pdata = dev->platform_data;
-  return pdata->current_baud = spi_get_baudrate(pdata->hw);
+  if (!baud) {
+    return -EINVAL;
+  }
+  *baud = pdata->current_baud = spi_get_baudrate(pdata->hw);
+  return 0;
 }
 
 static int spidrv_master_probe(struct device *dev) {
@@ -77,10 +83,10 @@ static int spidrv_master_probe(struct device *dev) {
   return 0;
 }
 
-static int spidrv_master_read_nbytes(const struct device *dev, void *buf,
+static int spidrv_master_read_nbytes(const struct device *dev, uint8_t repeating_byte, void *buf,
                                      uint32_t len) {
   struct spi_master_platform_data *pdata = dev->platform_data;
-  return spi_read_blocking(pdata->hw, 0, buf, len);
+  return spi_read_blocking(pdata->hw, repeating_byte, buf, len);
 }
 
 static int spidrv_master_write_nbytes(const struct device *dev, const void *buf,
@@ -120,6 +126,20 @@ static int spidrv_chip_probe(struct device *dev) {
     goto err_free;
   }
 
+  int byte;
+  int rc = get_prop_int32(dev, "empty-tx-byte", &byte);
+  if (rc != 0) {
+    dev_err(dev, "Failed to get empty-tx-byte property for device %s: %d",
+            dev->name, rc);
+    goto err_free;
+  }
+  if ((byte & 0xFF) != byte) {
+    dev_err(dev, "Invalid empty-tx-byte value for device %s: %d", dev->name,
+            byte);
+    goto err_free;
+  }
+  pdata->empty_tx_byte = (uint8_t)byte;
+
   pdata->cs = cs_gpio;
   return 0;
 err_free:
@@ -128,18 +148,18 @@ err_free:
   return -EINVAL;
 }
 
-static void spidrv_chip_assert_cs(const struct device *dev) {
+static int spidrv_chip_assert_cs(const struct device *dev) {
   struct spi_chip_platform_data *pdata = dev->platform_data;
   struct spi_master_platform_data *master_pdata = dev->parent->platform_data;
 
   if (pdata->asserted) {
     dev_err(dev, "Chip select already asserted for device %s", dev->name);
-    return;
+    return -EINVAL;
   }
 
   if (!master_pdata) {
     dev_err(dev, "Parent device %s has no platform data", dev->parent->name);
-    return;
+    return -EINVAL;
   }
   // Push up the baud rate to the default for this chip, and save the current
   // baud rate for later restoration.
@@ -149,16 +169,17 @@ static void spidrv_chip_assert_cs(const struct device *dev) {
   // Assert the chip select GPIO
   gpio_set_value(pdata->cs, 1);
   pdata->asserted = true;
+  return 0;
 }
 
-static void spidrv_chip_deassert_cs(const struct device *dev) {
+static int spidrv_chip_deassert_cs(const struct device *dev) {
   struct spi_chip_platform_data *pdata = dev->platform_data;
   // Restore the previous baud rate for the SPI master
   struct spi_master_platform_data *master_pdata = dev->parent->platform_data;
 
   if (!pdata->asserted) {
     dev_err(dev, "Chip select not asserted for device %s", dev->name);
-    return;
+    return -EINVAL;
   }
 
   // Deassert the chip select GPIO
@@ -166,11 +187,12 @@ static void spidrv_chip_deassert_cs(const struct device *dev) {
 
   if (!master_pdata) {
     dev_err(dev, "Parent device %s has no platform data", dev->parent->name);
-    return;
+    return -ENODEV;
   }
   spi_set_baudrate(master_pdata->hw, pdata->saved_baud);
   pdata->saved_baud = 0; // Clear the saved baud rate after restoration
   pdata->asserted = false;
+  return 0;
 }
 
 static void spidrv_chip_remove(struct device *dev) {
@@ -178,6 +200,59 @@ static void spidrv_chip_remove(struct device *dev) {
   gpio_desc_release(dev, pdata->cs);
   free(pdata);
   dev->platform_data = NULL;
+}
+
+static int spidrv_chip_read_nbytes(const struct device *dev, void *buf,
+                                 uint32_t len) {
+  struct spi_chip_platform_data *pdata = dev->platform_data;
+  struct spi_master_platform_data *master_pdata = dev->parent->platform_data;
+
+  if (!pdata->asserted) {
+    dev_err(dev, "Chip select not asserted for device %s", dev->name);
+    return -EINVAL;
+  }
+
+  return spi_read_blocking(master_pdata->hw, pdata->empty_tx_byte, buf, len);
+}
+
+static int spidrv_chip_write_nbytes(const struct device *dev, const void *buf,
+                                  uint32_t len) {
+  struct spi_chip_platform_data *pdata = dev->platform_data;
+  struct spi_master_platform_data *master_pdata = dev->parent->platform_data;
+
+  if (!pdata->asserted) {
+    dev_err(dev, "Chip select not asserted for device %s", dev->name);
+    return -EINVAL;
+  }
+
+  return spi_write_blocking(master_pdata->hw, buf, len);
+}
+
+static int spidrv_chip_set_baud(const struct device *dev, uint32_t baud) {
+  struct spi_chip_platform_data *pdata = dev->platform_data;
+  struct spi_master_platform_data *master_pdata = dev->parent->platform_data;
+
+  if (!pdata->asserted) {
+    dev_err(dev, "Chip select not asserted for device %s", dev->name);
+    return -EINVAL;
+  }
+
+  spi_set_baudrate(master_pdata->hw, baud);
+  return 0;
+}
+
+static int spidrv_chip_get_baud(const struct device *dev, uint32_t *baud) {
+  struct spi_master_platform_data *master_pdata = dev->parent->platform_data;
+
+  if (!master_pdata) {
+    dev_err(dev, "Parent device %s has no platform data", dev->parent->name);
+    return 0;
+  }
+  if (!baud) {
+    return -EINVAL;
+  }
+  *baud = master_pdata->current_baud = spi_get_baudrate(master_pdata->hw);
+  return 0;
 }
 
 static const struct driver_fdt_match_id pico_spi_master_match_table[] = {
@@ -201,35 +276,44 @@ static struct spi_chip_driver pico_spi_chip_driver = {
                            .probe = spidrv_chip_probe,
                            .remove = spidrv_chip_remove},
     .assert_cs = spidrv_chip_assert_cs,
-    .deassert_cs = spidrv_chip_deassert_cs};
+    .deassert_cs = spidrv_chip_deassert_cs,
+    .set_baud = spidrv_chip_set_baud,
+    .get_baud = spidrv_chip_get_baud,
+    .read_nbytes = spidrv_chip_read_nbytes,
+    .write_nbytes = spidrv_chip_write_nbytes};
 
 PLATFORM_DRIVER(pico_spi_driver);
 PLATFORM_DRIVER(pico_spi_chip_driver);
 
-int spi_master_set_baud(const struct device *dev, uint32_t baud) {
-  struct spi_master_driver *drv =
-      container_of(dev->drv, struct spi_master_driver, drv);
+int spi_chip_set_baud(const struct device *dev, uint32_t baud) {
+  struct spi_chip_driver *drv =
+      container_of(dev->drv, struct spi_chip_driver, drv);
   if (!drv || !drv->set_baud) {
-    dev_err(dev, "SPI master driver does not support set_baud");
+    dev_err(dev, "SPI chip driver does not support set_baud");
     return -ENOSYS;
   }
   drv->set_baud(dev, baud);
   return 0;
 }
 
-uint32_t spi_master_get_baud(const struct device *dev) {
-  struct spi_master_driver *drv =
-      container_of(dev->drv, struct spi_master_driver, drv);
+uint32_t spi_chip_get_baud(const struct device *dev) {
+  struct spi_chip_driver *drv =
+      container_of(dev->drv, struct spi_chip_driver, drv);
   if (!drv || !drv->get_baud) {
-    dev_err(dev, "SPI master driver does not support get_baud");
+    dev_err(dev, "SPI chip driver does not support get_baud");
     return -ENOSYS;
   }
-  return drv->get_baud(dev);
+  uint32_t baud;
+  int ret = drv->get_baud(dev, &baud);
+  if (ret) {
+    return ret;
+  }
+  return baud;
 }
 
-int spi_master_read_nbytes(const struct device *dev, void *buf, uint32_t len) {
-  struct spi_master_driver *drv =
-      container_of(dev->drv, struct spi_master_driver, drv);
+int spi_chip_read_nbytes(const struct device *dev, void *buf, uint32_t len) {
+  struct spi_chip_driver *drv =
+      container_of(dev->drv, struct spi_chip_driver, drv);
   if (!drv || !drv->read_nbytes) {
     dev_err(dev, "SPI chip driver does not support read_nbytes");
     return -ENOSYS;
@@ -237,10 +321,10 @@ int spi_master_read_nbytes(const struct device *dev, void *buf, uint32_t len) {
   return drv->read_nbytes(dev, buf, len);
 }
 
-int spi_master_write_nbytes(const struct device *dev, const void *buf,
+int spi_chip_write_nbytes(const struct device *dev, const void *buf,
                             uint32_t len) {
-  struct spi_master_driver *drv =
-      container_of(dev->drv, struct spi_master_driver, drv);
+  struct spi_chip_driver *drv =
+      container_of(dev->drv, struct spi_chip_driver, drv);
   if (!drv || !drv->write_nbytes) {
     dev_err(dev, "SPI chip driver does not support write_nbytes");
     return -ENOSYS;
@@ -270,9 +354,9 @@ int spi_chip_deassert_cs(const struct device *dev) {
   return 0;
 }
 
-int spi_master_write_byte(const struct device *dev, uint8_t byte) {
-  return spi_master_write_nbytes(dev, &byte, 1);
+int spi_chip_write_byte(const struct device *dev, uint8_t byte) {
+  return spi_chip_write_nbytes(dev, &byte, 1);
 }
-int spi_master_read_byte(const struct device *dev, uint8_t *byte) {
-  return spi_master_read_nbytes(dev, byte, 1);
+int spi_chip_read_byte(const struct device *dev, uint8_t *byte) {
+  return spi_chip_read_nbytes(dev, byte, 1);
 }

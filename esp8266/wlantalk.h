@@ -1,8 +1,10 @@
 #ifndef WLANTALK_H
 #define WLANTALK_H
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 // MyProtcol: Text based talking protocol between Pico and ESP8266.
 // Format: :<total_length>:<command>:<data>\n (Total length includes the length
@@ -74,10 +76,6 @@ static inline int parse_wlan_talk_message(wlan_uart_getc_func getc_func,
   parsed.data_len = data_len;
   *msg = parsed;
 
-  printf("WLAN talk message parsed: command='%.*s', data='%.*s', "
-         "total_length=%zu\n",
-         (int)command_len, parsed.command, (int)data_len, parsed.data,
-         total_length);
   return 0;
 }
 
@@ -89,6 +87,9 @@ static inline int make_wlan_talk_message(wlan_uart_putc_func putc_func,
     return -1;
 
   struct wlan_talk_message bounds;
+  assert(strlen(command) < sizeof(bounds.command));
+  assert(strlen(data) < sizeof(bounds.data));
+
   size_t command_len = 0, data_len = 0;
   while (command_len < sizeof(bounds.command) && command[command_len]) {
     int c = (unsigned char)command[command_len];
@@ -135,10 +136,6 @@ static inline int make_wlan_talk_message(wlan_uart_putc_func putc_func,
   for (size_t i = 0; i < data_len; i++)
     putc_func(privdata, data[i]);
   putc_func(privdata, '\n');
-
-  printf(
-      "WLAN talk message sent: command='%.*s', data='%.*s', total_length=%zu\n",
-      (int)command_len, command, (int)data_len, data, total_length);
   return (int)total_length;
 }
 

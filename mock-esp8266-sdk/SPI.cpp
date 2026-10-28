@@ -1,4 +1,4 @@
-#include "Arduino.h"
+#include "SPI.h"
 // SPI
 SPIClass SPI;
 

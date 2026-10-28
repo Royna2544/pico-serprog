@@ -12,18 +12,6 @@ enum wlan_driver_boot_mode {
   WLAN_BOOT_UPLOAD,
   __WLAN_BOOT_TEST,
 };
-#include <drivers/gpiolib.h>
-
-struct esp8266_platform_data {
-  struct gpio_desc *en_pin;
-  struct gpio_desc *rst_pin;
-  struct gpio_desc *gpio0_pin;
-  struct gpio_desc *gpio2_pin;
-  struct gpio_desc *gpio15_pin;
-  int bootpin_irq;
-
-  enum wlan_driver_boot_mode cur_boot_mode;
-};
 
 struct esp8266_driver {
   struct driver drv;

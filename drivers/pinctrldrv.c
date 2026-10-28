@@ -249,12 +249,11 @@ int pinctrl_gpio_request(struct device *dev, const struct device *requester,
   for (int i = 0; i < pdata->num_mappings; i++) {
     struct pinctrl_mapping *mapping = &pdata->mappings[i];
     for (int j = 0; j < mapping->num_pins; j++) {
-      if (mapping->pins[j] == pin->pin) {
-        dev_err(dev,
-                "Pin %d is part of pinctrl mapping %s and cannot be requested "
-                "as GPIO",
-                pin->pin, mapping->state_name);
-        return -EINVAL;
+      if (mapping->pins[j] == pin->pin && mapping->used_by) {
+        dev_err(dev, "Pin %d is already in use by device %s in mapping %s",
+                pin->pin, mapping->used_by->name,
+                mapping->state_name ? mapping->state_name : "(no name)");
+        return -EBUSY;
       }
     }
   }

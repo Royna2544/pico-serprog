@@ -27,6 +27,8 @@ int gpio_set_value(struct gpio_desc *desc, bool value);
 int gpio_get_value(struct gpio_desc *desc, bool *value, bool raw);
 int gpio_to_irq(struct gpio_desc *desc);
 void gpio_reset(struct gpio_desc *desc);
+int gpio_desc_set_pullup(struct gpio_desc *desc, bool enable);
+int gpio_desc_set_pulldown(struct gpio_desc *desc, bool enable);
 
 struct gpio_driver {
   struct driver drv;

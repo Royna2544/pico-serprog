@@ -45,9 +45,12 @@ set(TINYLINUX_SOURCES
     drivers/spidrv.c
     drivers/gpiodrv.c
     drivers/gpiolib.c
+    drivers/i2cdrv.c
     drivers/pinctrldrv.c
     drivers/usbcdcdrv.c
     drivers/serprog.c
+    drivers/latched-switch.c
+    drivers/signal-action.c
     drivers/passthru.c
 )
 
@@ -89,6 +92,7 @@ else()
         mock-esp8266-sdk/Sockets.cpp
         mock-esp8266-sdk/FS.cpp
         mock-esp8266-sdk/Crypto.cpp
+        mock-esp8266-sdk/SPI.cpp
         mock-esp8266-sdk/vendor/ESP8266WebServer/detail/mimetable.cpp)
     target_compile_features(esp-mock-sdk PUBLIC cxx_std_17)
     target_include_directories(esp-mock-sdk PUBLIC mock-esp8266-sdk
@@ -135,8 +139,8 @@ else()
     target_link_libraries(pico_serprog PRIVATE pico-mock-sdk fdt boardstate-client)
     add_subdirectory(mock-pico-sdk)
     target_compile_definitions(pico_serprog PRIVATE MOCK_HARDWARE)
-    #target_compile_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
-    #target_link_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
+    target_compile_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
+    target_link_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
 endif()
 # GCC defers a bare -T until after -Wl options, reversing the order relative to
 # the SDK's memory-map script. INSERT scripts must precede that full script.
@@ -147,7 +151,12 @@ set_property(TARGET pico_serprog APPEND PROPERTY LINK_DEPENDS
 
 find_program(DTC dtc REQUIRED)
 
-set(DTS "${CMAKE_CURRENT_SOURCE_DIR}/board.dts")
+if (MOCK_HARDWARE)
+set(DTS "${CMAKE_CURRENT_SOURCE_DIR}/dts/mock-board.dts")
+else()
+set(DTS "${CMAKE_CURRENT_SOURCE_DIR}/dts/board.dts")
+endif()
+set(COMMON_DTSI "${CMAKE_CURRENT_SOURCE_DIR}/dts/common.dtsi")
 set(DTB "${CMAKE_CURRENT_BINARY_DIR}/board.dtb")
 set(DTB_ASM "${CMAKE_CURRENT_BINARY_DIR}/board_dtb.S")
 
@@ -159,7 +168,7 @@ add_custom_command(
         -O dtb
         -o "${DTB}"
         "${DTS}"
-    DEPENDS "${DTS}"
+    DEPENDS "${DTS}" "${COMMON_DTSI}"
     COMMENT "Compiling device tree"
     VERBATIM
 )

@@ -80,7 +80,8 @@ static void gpio_irq_handler(void) {
       continue;
 
     describe_pico_mask(NULL, pin, event);
-    // Acknowledge only the snapshot being dispatched, not every configured edge.
+    // Acknowledge only the snapshot being dispatched, not every configured
+    // edge.
     gpio_acknowledge_irq(pin, event);
     int rc = generic_irq_handle(domain, data->irq,
                                 translate_pico_to_ours_irq_flags(event));
@@ -202,6 +203,14 @@ static int gpiodrv_irq_set_type(struct irq_chip *chip, struct irq_data *data,
   return 0;
 }
 
+static int gpiodrv_irq_free(struct irq_chip *chip, struct irq_data *data) {
+  if (data->chip_data) {
+    free(data->chip_data);
+    data->chip_data = NULL;
+  }
+  return 0;
+}
+
 static struct irq_chip gpio_chip = {
     .name = "rp2040-sio-irq",
     .master = NULL, // This will be set during initialization
@@ -211,6 +220,7 @@ static struct irq_chip gpio_chip = {
     .disable = gpiodrv_irq_disable,
     .ack = gpiodrv_irq_ack,
     .set_type = gpiodrv_irq_set_type,
+    .free = gpiodrv_irq_free,
     .refcount = 0,
 };
 
@@ -223,36 +233,40 @@ static int gpiodrv_get_value(struct gpio_desc *desc, bool *value) {
   *value = gpio_get(desc->pin) ^ desc->active_low;
   return 0;
 }
-static int gpiodrv_set_value(struct gpio_desc *desc, bool value) {
-  if (!desc->controlled)
+static void take_gpio_control(struct gpio_desc *desc) {
+  if (!desc->controlled) {
     gpio_init(desc->pin);
-  gpio_put(desc->pin, value ^ desc->active_low);
+    desc->controlled = true;
+  }
+}
+
+static int gpiodrv_set_value(struct gpio_desc *desc, bool value) {
+  take_gpio_control(desc);
   gpio_set_dir(desc->pin, GPIO_OUT);
+  gpio_put(desc->pin, value ^ desc->active_low);
   desc->direction = GPIO_DIR_OUT;
-  desc->controlled = true;
   return 0;
 }
+
 static int gpiodrv_set_direction(struct gpio_desc *desc, gpio_direction_t dir) {
-  if (!desc->controlled)
-    gpio_init(desc->pin);
+  take_gpio_control(desc);
   if (dir == GPIO_DIR_IN) {
     gpio_set_dir(desc->pin, GPIO_IN);
   } else {
     gpio_set_dir(desc->pin, GPIO_OUT);
   }
   desc->direction = dir;
-  desc->controlled = true;
   return 0;
 }
 static void gpiodrv_pullup(struct gpio_desc *desc, bool enable) {
+  take_gpio_control(desc);
   gpio_set_pulls(desc->pin, enable, desc->pulldown);
   desc->pullup = enable;
-  desc->controlled = true;
 }
 static void gpiodrv_pulldown(struct gpio_desc *desc, bool enable) {
+  take_gpio_control(desc);
   gpio_set_pulls(desc->pin, desc->pullup, enable);
   desc->pulldown = enable;
-  desc->controlled = true;
 }
 
 static void gpiodrv_reset(struct gpio_desc *desc) {
@@ -260,6 +274,11 @@ static void gpiodrv_reset(struct gpio_desc *desc) {
     pr_err("GPIO: Invalid gpio_desc or master device");
     return;
   }
+  if (!desc->controlled) {
+    pr_debug("GPIO: Pin %d is not controlled, nothing to reset", desc->pin);
+    return;
+  }
+  pr_debug("GPIO: Resetting pin %d to default state", desc->pin);
 
   gpio_set_dir(desc->pin, GPIO_IN);
   gpio_set_pulls(desc->pin, false, false);
@@ -318,8 +337,8 @@ static void gpiodrv_release(struct device *request_dev,
                             struct gpio_desc *desc) {
   int rc = gpiochip_release_pin(desc->master, request_dev, desc);
   if (rc)
-    dev_warn(desc->master, "Failed to release GPIO pin %d claim: %d",
-             desc->pin, rc);
+    dev_warn(desc->master, "Failed to release GPIO pin %d claim: %d", desc->pin,
+             rc);
   gpiodrv_reset(desc);
   free(desc);
 }
@@ -379,3 +398,35 @@ static struct gpio_driver gpiodrv = {.drv =
                                      .release_irq = gpiodrv_release_irq};
 
 PLATFORM_DRIVER(gpiodrv);
+
+int gpio_desc_set_pullup(struct gpio_desc *desc, bool enable) {
+  if (!desc || !desc->master) {
+    pr_err("GPIO: Invalid gpio_desc or master device for set_pullup");
+    return -EINVAL;
+  }
+  struct gpio_driver *gpio_drv =
+      container_of(desc->master->drv, struct gpio_driver, drv);
+  if (gpio_drv && gpio_drv->pullup) {
+    gpio_drv->pullup(desc, enable);
+    return 0;
+  } else {
+    pr_err("GPIO: GPIO driver does not support pullup configuration");
+    return -ENOSYS;
+  }
+}
+
+int gpio_desc_set_pulldown(struct gpio_desc *desc, bool enable) {
+  if (!desc || !desc->master) {
+    pr_err("GPIO: Invalid gpio_desc or master device for set_pulldown");
+    return -EINVAL;
+  }
+  struct gpio_driver *gpio_drv =
+      container_of(desc->master->drv, struct gpio_driver, drv);
+  if (gpio_drv && gpio_drv->pulldown) {
+    gpio_drv->pulldown(desc, enable);
+    return 0;
+  } else {
+    pr_err("GPIO: GPIO driver does not support pulldown configuration");
+    return -ENOSYS;
+  }
+}

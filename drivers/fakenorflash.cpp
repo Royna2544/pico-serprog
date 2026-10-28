@@ -774,20 +774,23 @@ static void fake_spi_chip_remove(struct device *dev) {
   dev->platform_data = nullptr;
 }
 
-static void fake_spi_set_baud(const struct device *dev, uint32_t baud) {
+static int fake_spi_set_baud(const struct device *dev, uint32_t baud) {
   auto *master = static_cast<FakeSpiMaster *>(dev->platform_data);
   if (!master || !baud)
-    return;
+    return -EINVAL;
   std::lock_guard<std::mutex> lock(master->bus->mutex);
   master->bus->baud = std::min(baud, uint32_t(133000000));
+  return 0;
 }
 
-static uint32_t fake_spi_get_baud(const struct device *dev) {
+static int fake_spi_get_baud(const struct device *dev, uint32_t *baud) {
   auto *master = static_cast<FakeSpiMaster *>(dev->platform_data);
-  if (!master)
-    return 0;
+  if (!master || !baud)
+    return -EINVAL;
   std::lock_guard<std::mutex> lock(master->bus->mutex);
-  return master->bus->baud;
+  *baud = master->bus->baud;
+  return 0;
+
 }
 
 static int fake_spi_transfer(const struct device *dev, const void *tx, void *rx,
@@ -813,7 +816,7 @@ static int fake_spi_transfer(const struct device *dev, const void *tx, void *rx,
   return static_cast<int>(len);
 }
 
-static int fake_spi_read(const struct device *dev, void *buf, uint32_t len) {
+static int fake_spi_read(const struct device *dev, uint8_t b, void *buf, uint32_t len) {
   if (!buf && len)
     return -EINVAL;
   return fake_spi_transfer(dev, nullptr, buf, len);
@@ -826,26 +829,29 @@ static int fake_spi_write(const struct device *dev, const void *buf,
   return fake_spi_transfer(dev, buf, nullptr, len);
 }
 
-static void fake_spi_assert_cs(const struct device *dev) {
+static int  fake_spi_assert_cs(const struct device *dev) {
   auto *chip = static_cast<FakeNor *>(dev->platform_data);
   if (!chip)
-    return;
+    return -ENODEV;
   std::lock_guard<std::mutex> lock(chip->bus->mutex);
   if (chip->bus->enabled && !chip->bus->selected) {
     chip->select();
     chip->bus->selected = chip;
   }
+  return 0;
 }
 
-static void fake_spi_deassert_cs(const struct device *dev) {
+
+static int fake_spi_deassert_cs(const struct device *dev) {
   auto *chip = static_cast<FakeNor *>(dev->platform_data);
   if (!chip)
-    return;
+    return -ENODEV;
   std::lock_guard<std::mutex> lock(chip->bus->mutex);
   if (chip->bus->selected == chip) {
     chip->deselect();
     chip->bus->selected = nullptr;
   }
+  return 0;
 }
 
 static const struct driver_fdt_match_id fake_spi_master_ids[] = {
@@ -857,6 +863,32 @@ static const struct driver_fdt_match_id fake_spi_chip_ids[] = {
     {.compatible = "fake,spi-chip"},
     {},
 };
+
+int fake_spi_chip_set_baud(const struct device *dev, uint32_t baud) {
+  if (!dev || !dev->parent)
+    return -EINVAL;
+  return fake_spi_set_baud(dev->parent, baud);
+}
+
+int fake_spi_chip_get_baud(const struct device *dev, uint32_t *baud) {
+  if (!dev || !dev->parent || !baud)
+    return -EINVAL;
+  return fake_spi_get_baud(dev->parent, baud);
+}
+
+int fake_spi_chip_read(const struct device *dev,  void *buf,
+                       uint32_t len) {
+  if (!dev || !dev->parent)
+    return -ENODEV;
+  return fake_spi_read(dev->parent, 0, buf, len);
+}
+
+int fake_spi_chip_write(const struct device *dev, const void *buf,
+                        uint32_t len) {
+  if (!dev || !dev->parent)
+    return -ENODEV;
+  return fake_spi_write(dev->parent, buf, len);
+}
 
 static struct spi_master_driver fake_spi_master_driver = {
     .drv =
@@ -882,6 +914,10 @@ static struct spi_chip_driver fake_spi_chip_driver = {
         },
     .assert_cs = fake_spi_assert_cs,
     .deassert_cs = fake_spi_deassert_cs,
+    .set_baud = fake_spi_chip_set_baud,
+    .get_baud = fake_spi_chip_get_baud,
+    .read_nbytes = fake_spi_chip_read,
+    .write_nbytes = fake_spi_chip_write,
 };
 
 PLATFORM_DRIVER(fake_spi_master_driver);
