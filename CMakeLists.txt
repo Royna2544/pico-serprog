@@ -52,6 +52,7 @@ set(TINYLINUX_SOURCES
     drivers/latched-switch.c
     drivers/signal-action.c
     drivers/passthru.c
+    drivers/pcf8574t_16x2_lcd.c
 )
 
 if (NOT MOCK_HARDWARE)
@@ -79,6 +80,8 @@ else()
     target_include_directories(boardstate-client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     add_executable(boardstate-daemon boardstate-daemon/boardstate.cpp)
     target_link_libraries(boardstate-daemon PRIVATE fdt)
+    add_executable(unified_daemon unified_daemon.c)
+    target_compile_options(unified_daemon PRIVATE -Wall -Wextra)
 
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(NETWORK_MANAGER_LIB REQUIRED IMPORTED_TARGET libnm)
@@ -120,6 +123,9 @@ else()
     set_source_files_properties(esp8266/esp8266.ino PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
     add_executable(esp8266-mock mock-esp8266-sdk/main.cpp esp8266/esp8266.ino)
     target_link_libraries(esp8266-mock PRIVATE esp-mock-sdk)
+    add_executable(vpmic-mock mock-vpmic-sdk/main.cpp)
+    target_include_directories(vpmic-mock PRIVATE mock-vpmic-sdk)
+    target_link_libraries(vpmic-mock PRIVATE boardstate-client)
     add_executable(esp-restart-probe mock-esp8266-sdk/main.cpp tests/esp-restart-probe.cpp)
     target_link_libraries(esp-restart-probe PRIVATE esp-mock-sdk)
     add_executable(boardstate-pico-smoke tests/boardstate-pico-smoke.c)
@@ -195,5 +201,6 @@ if (MOCK_HARDWARE)
     add_dependencies(boardstate-daemon devicetree_blob)
     target_sources(boardstate-wlan-host PRIVATE "${DTB_ASM}")
     add_dependencies(boardstate-wlan-host devicetree_blob)
+    add_dependencies(unified_daemon boardstate-daemon vpmic-mock esp8266-mock pico_serprog)
 endif()
 

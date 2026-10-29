@@ -38,6 +38,8 @@ static int gpio_property(const void *fdt, int node, const char *name) {
 }
 
 BoardState::BoardState(const std::string &dtb) {
+  const char *trace = std::getenv("BOARDSTATE_VERBOSE");
+  verbose = trace && std::strcmp(trace, "1") == 0;
   std::ifstream file(dtb, std::ios::binary);
   if (!file)
     throw std::runtime_error("cannot open DTB: " + dtb);
@@ -105,6 +107,23 @@ BoardState::BoardState(const std::string &dtb) {
   pico[strap15].external_down = true;
   esp[esp_tx].function = "uart";
   esp[esp_uart_rx].function = "uart";
+
+  int vpmic = fdt_path_offset(fdt, "/vpmic-uno");
+  if (vpmic >= 0) {
+    if (!fdt_getprop(fdt, vpmic, "royna,npn-vpmic-wiring", nullptr) ||
+        !fdt_getprop(fdt, vpmic, "collector-pull-up", nullptr) ||
+        !fdt_getprop(fdt, vpmic, "base-pull-down", nullptr))
+      throw std::runtime_error("invalid Uno vpmic node");
+    uno_pico_pin = gpio_property(fdt, vpmic, "collector-gpios");
+    const auto *cell = static_cast<const fdt32_t *>(
+        fdt_getprop(fdt, vpmic, "uno-pin", &len));
+    if (!cell || len != sizeof(fdt32_t) || fdt32_to_cpu(*cell) > 19 ||
+        pico[uno_pico_pin].peer != -1)
+      throw std::runtime_error("invalid Uno vpmic pin/wiring");
+    uno_pin = fdt32_to_cpu(*cell);
+    pico[uno_pico_pin].external_up = true;
+    uno.external_down = true;
+  }
 }
 
 bool BoardState::drives(bool is_esp, int number) const {
@@ -115,6 +134,19 @@ bool BoardState::drives(bool is_esp, int number) const {
 }
 
 int BoardState::level(bool is_esp, int number) const {
+  if (!is_esp && number == uno_pico_pin) {
+    const Pin &collector = pico[number];
+    bool pico_drives = drives(false, number);
+    bool pico_high = collector.function == "uart" || collector.latch;
+    bool npn_on = uno.function == "sio" && uno.output && uno.latch;
+    if (npn_on && pico_drives && pico_high)
+      return -2; // Pico high output fights the NPN pulling its collector low.
+    if (npn_on) return 0;
+    if (pico_drives) return pico_high;
+    if (collector.pull_up || collector.external_up) return 1;
+    if (collector.pull_down || collector.external_down) return 0;
+    return 0;
+  }
   const Pin &p = is_esp ? esp[number] : pico[number];
   const Pin *other = p.peer < 0 ? nullptr :
       (is_esp ? &pico[p.peer] : &esp[p.peer]);
@@ -223,10 +255,13 @@ std::string BoardState::request(const std::string &line) {
   std::istringstream in(line);
   std::string kind, board, action, extra;
   in >> kind >> board;
-  if (board != "pico" && board != "esp") return "ERR board";
+  if (board != "pico" && board != "esp" &&
+      !(board == "uno" && uno_pin >= 0)) return "ERR board";
   bool is_esp = board == "esp";
+  bool is_uno = board == "uno";
+  if (is_uno && kind != "GPIO") return "ERR operation";
   if (kind == "RESET") {
-    if (is_esp || (in >> extra)) return "ERR operation";
+    if (is_esp || is_uno || (in >> extra)) return "ERR operation";
     reset_pico();
     return "OK";
   }
@@ -256,8 +291,9 @@ std::string BoardState::request(const std::string &line) {
   }
   if (kind == "GPIO") {
     std::string pin_text;
-    int max_pin = is_esp ? 16 : static_cast<int>(pico.size()) - 1;
-    std::string range = "0-" + std::to_string(max_pin);
+    int max_pin = is_esp ? 16 : is_uno ? uno_pin : static_cast<int>(pico.size()) - 1;
+    std::string range = is_uno ? "only " + std::to_string(uno_pin) + " wired" :
+                        "0-" + std::to_string(max_pin);
     if (!(in >> pin_text))
       return "ERR GPIO " + board + " missing pin (valid " + range + ")";
     long long parsed_pin;
@@ -271,30 +307,34 @@ std::string BoardState::request(const std::string &line) {
       return "ERR GPIO " + board + " pin '" + shown +
              "' is not an integer (valid " + range + ")";
     }
-    if (parsed_pin < 0 || parsed_pin > max_pin)
+    if (parsed_pin < 0 || parsed_pin > max_pin ||
+        (is_uno && parsed_pin != uno_pin))
       return "ERR GPIO " + board + " pin " + pin_text +
              " out of range (valid " + range +
              (is_esp ? "; EN/RESET aren't GPIO)" : ")");
     if (!(in >> action))
       return "ERR GPIO " + board + " pin " + pin_text + " missing operation";
     int number = static_cast<int>(parsed_pin);
-    Pin &pin = is_esp ? esp[number] : pico[number];
+    Pin &pin = is_uno ? uno : is_esp ? esp[number] : pico[number];
     if (action == "FUNCTION") {
       if (in >> extra) return "ERR syntax";
       return pin.function;
     }
     if (action == "DRIVE") {
       if (in >> extra) return "ERR syntax";
-      if (!drives(is_esp, number)) return "input";
+      if (!(is_uno ? (uno.function == "sio" && uno.output) :
+            drives(is_esp, number))) return "input";
       return pin.function == "uart" ? "uart-tx" : "sio-out";
     }
     if (action == "GET") {
       if (in >> extra) return "ERR syntax";
-      int value = level(is_esp, number);
+      int value = is_uno ? (uno.output ? uno.latch :
+                            (uno.pull_up || uno.external_up)) :
+                  level(is_esp, number);
       return value < 0 ? "ERR contention" : std::to_string(value);
     }
     if (action == "IRQ_STATUS") {
-      if (is_esp) return "ERR operation";
+      if (is_esp || is_uno) return "ERR operation";
       if (in >> extra) return "ERR syntax";
       return std::to_string(irq_status(number));
     }
@@ -302,7 +342,7 @@ std::string BoardState::request(const std::string &line) {
     if (!(in >> value) || (in >> extra)) return "ERR syntax";
     if (action == "IRQ_ENABLE" || action == "IRQ_DISABLE" ||
         action == "IRQ_ACK") {
-      if (is_esp) return "ERR operation";
+      if (is_esp || is_uno) return "ERR operation";
       int mask;
       try {
         size_t end;
@@ -321,10 +361,14 @@ std::string BoardState::request(const std::string &line) {
       return "ERR ROM owns GPIO2";
     if (is_esp && mode != ESPMode::Flash)
       return "ERR ESP sketch not running";
+    bool was_driving = is_uno ? (uno.function == "sio" && uno.output) :
+                       drives(is_esp, number);
+    bool was_high = pin.function == "uart" || pin.latch;
     std::array<int, 30> before;
     for (size_t i = 0; i < pico.size(); ++i)
       before[i] = level(false, i);
     if (action == "MUX") {
+      if (is_uno && value != "sio") return "ERR mux";
       if (value != "sio" && value != "uart" && value != "spi" &&
           value != "i2c" && value != "pwm" && value != "clk") return "ERR mux";
       pin.function = value;
@@ -340,9 +384,20 @@ std::string BoardState::request(const std::string &line) {
     } else return "ERR operation";
     update_boot_state();
     update_irq_edges(before);
+    if (verbose) {
+      bool now_driving = is_uno ? (uno.function == "sio" && uno.output) :
+                         drives(is_esp, number);
+      bool now_high = pin.function == "uart" || pin.latch;
+      if (now_driving && (!was_driving || was_high != now_high))
+        std::fprintf(stderr, "%s> pin %d set %s\n", board.c_str(), number,
+                     now_high ? "high" : "low");
+      else if (was_driving && !now_driving)
+        std::fprintf(stderr, "%s> pin %d reset to hi-Z\n", board.c_str(), number);
+    }
     return "OK";
   }
   if (kind == "UART") {
+    if (is_uno) return "ERR operation";
     if (!(in >> action)) return "ERR operation";
     if (action == "RX") {
       if (in >> extra) return "ERR syntax";
@@ -359,6 +414,12 @@ std::string BoardState::request(const std::string &line) {
       return "ERR ESP sketch not running";
     if ((is_esp ? esp[esp_tx].function : pico[pico_tx].function) != "uart")
       return "ERR UART TX pin not muxed";
+    if (verbose)
+      std::fprintf(stderr, "uart> %s->%s [%02x]%s\n", board.c_str(),
+                   is_esp ? "pico" : "esp", byte,
+                   mode != ESPMode::Flash ? " (discarded: ESP not in flash mode)" :
+                   (is_esp ? pico[pico_uart_rx].function : esp[esp_uart_rx].function) != "uart"
+                       ? " (receiver not muxed)" : "");
     if (mode != ESPMode::Flash) return "OK"; // Unpowered or ROM receiver: no decoder.
     if ((is_esp ? pico[pico_uart_rx].function : esp[esp_uart_rx].function) != "uart")
       return "OK"; // TX still occurs, but no peripheral is listening on the wire.

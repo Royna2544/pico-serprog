@@ -21,7 +21,7 @@ struct esp8266_driver {
               char *response, size_t response_len);
 };
 
-void wlan_set_boot_mode(struct device *device, enum wlan_driver_boot_mode mode);
+int wlan_set_boot_mode(struct device *device, enum wlan_driver_boot_mode mode);
 int wlan_talk(struct device *device, const char *data, size_t len,
               char *response, size_t response_len);
 

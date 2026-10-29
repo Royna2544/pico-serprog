@@ -73,10 +73,16 @@ static int signal_action_probe(struct device *dev) {
 
   // Read current trig pin and trigger echo
   bool trig_value;
-  if (gpio_get_value(pdata->trig, &trig_value, false) == true && trig_value) {
-    dev_dbg(dev, "Initial trig pin is high, setting echo pin high");
-    // If trig pin is high, set echo pin high as well
-    gpio_set_value(pdata->echo, trig_value);
+  if (gpio_get_value(pdata->trig, &trig_value, false) == 0) {
+    if (trig_value) {
+      dev_dbg(dev, "Initial trig pin is active, setting echo pin high");
+      // If trig pin is high, set echo pin high as well
+      gpio_set_value(pdata->echo, trig_value);
+    }
+    bool raw_value;
+    gpio_get_value(pdata->trig, &raw_value, true);
+    dev_dbg(dev, "Initial trig pin value: %d, raw value: %d", trig_value,
+            raw_value);
   }
 
   int ret = devm_request_irq(dev, pdata->irq, signal_action_irq_handler, dev);

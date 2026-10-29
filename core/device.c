@@ -269,6 +269,7 @@ void drvcore_exit(void) {
 
 static int retry_deferred() {
   bool any_deferred = false;
+  int first_error = 0;
 
   struct list_head *p;
   list_for_each(p, &devices) {
@@ -299,6 +300,8 @@ static int retry_deferred() {
         pr_warn("DRVCORE: Deferred probe still deferred");
       } else if (rc < 0) {
         pr_warn("DRVCORE: Deferred probe failed with code %d", rc);
+        if (!first_error)
+          first_error = rc;
       }
     }
   }
@@ -315,7 +318,7 @@ static int retry_deferred() {
       pr_info("DRVCORE: %s", dev->name);
     }
   }
-  return 0;
+  return first_error;
 }
 postcore_initcall(retry_deferred);
 

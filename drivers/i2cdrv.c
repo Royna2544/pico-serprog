@@ -57,7 +57,11 @@ static int i2cdrv_controller_probe(struct device *dev) {
     return -ENODEV;
   }
 
-  i2c_init(pdata->device_hw, pdata->frequency);
+  if (i2c_init(pdata->device_hw, pdata->frequency) < 0) {
+    dev_err(dev, "Failed to initialize I2C controller");
+    free(pdata);
+    return -EIO;
+  }
   dev->platform_data = pdata;
 
   return 0;

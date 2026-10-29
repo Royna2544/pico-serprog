@@ -1,6 +1,6 @@
 {
     "editor.formatOnSave": true,
     "clangd.arguments": [
-        "--compile-commands-dir=build-host"
+        "--compile-commands-dir=build"
     ]
 }

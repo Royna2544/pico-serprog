@@ -174,9 +174,9 @@
             #address-cells = <1>;
             #size-cells = <0>;
 
-            display_i2c: display@27 {
+            display_i2c: display@3f {
                 compatible = "raspberrypi,rp2040-i2c-device";
-                reg = <0x27>;
+                reg = <0x3F>;
             };
         };
 
@@ -235,8 +235,15 @@
         interrupts-extended = <&gpio0 6 3>; // FALLING/RISING
 
         display0: display {
-            compatible = "nxp,pcf8574t";
+            compatible = "royna,pcf8574t-16x2-lcd";
             i2c-dev = <&display_i2c>;
+            display-width = <16>;
+            display-height = <2>;
+            init-commands = <
+               0x3 5
+               0x3 1
+               0x3 1
+               0x2 0>;
         };
     };
 

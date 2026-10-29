@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real CMake host firmware through USB CDC and serprog.
 
-Only private PTYs are used. The test-only preload library redirects the mock
-SDK's fixed paths without creating /tmp links or changing production files.
+The unified host runner owns the daemon, sketch processes and private PTYs.
 """
 
 import argparse
@@ -17,29 +16,37 @@ import tty
 
 class Host:
     def __init__(self, binary, output):
+        if binary.name != "pico_serprog":
+            raise ValueError("--binary must be the pico_serprog target in its host build directory")
         self.output = output
         self.pairs = {}
         self.process = None
         output.mkdir(parents=True, exist_ok=True)
-        shim = output / "fakenorflash_mock_paths.so"
-        subprocess.run(
-            ["clang", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
-             str(Path(__file__).with_name("fakenorflash_mock_paths.c")),
-             "-ldl", "-o", str(shim)], check=True)
-        env = os.environ.copy()
-        env["LD_PRELOAD"] = str(shim)
-        env["ASAN_OPTIONS"] = "abort_on_error=1"
-        env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
         try:
-            for name in ("uart0", "uart1", "cdc0", "cdc1", "cdc2"):
-                master, slave = pty.openpty()
-                tty.setraw(slave)
-                self.pairs[name] = (master, slave)
-                env[f"FAKENORFLASH_PTY_{name}"] = os.ttyname(slave)
             self.log = (output / "fakenorflash-host.log").open("wb")
+            env = {**os.environ, "TMPDIR": str(output),
+                   "ASAN_OPTIONS": "abort_on_error=1",
+                   "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"}
             self.process = subprocess.Popen(
-                [str(binary)], env=env, stdout=self.log,
+                [str(binary.parent / "unified_daemon"), str(binary.parent)],
+                env=env, stdout=self.log,
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            deadline = time.monotonic() + 5
+            run_dir = None
+            while time.monotonic() < deadline:
+                dirs = list(output.glob("unified-board-*/host-cdc0"))
+                if dirs:
+                    run_dir = dirs[0].parent
+                    break
+                if self.process.poll() is not None:
+                    raise RuntimeError(f"host supervisor exited; see {self.log.name}")
+                time.sleep(.02)
+            if run_dir is None:
+                raise TimeoutError(f"host PTYs unavailable; see {self.log.name}")
+            for name in ("uart0", "cdc0", "cdc1", "cdc2"):
+                fd = os.open(run_dir / f"host-{name}", os.O_RDWR | os.O_NOCTTY)
+                tty.setraw(fd)
+                self.pairs[name] = (fd,)
         except BaseException:
             self.close()
             raise
@@ -52,16 +59,16 @@ class Host:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
-        for master, slave in self.pairs.values():
-            os.close(master)
-            os.close(slave)
+        for pair in self.pairs.values():
+            for fd in pair:
+                os.close(fd)
         self.pairs.clear()
         if hasattr(self, "log"):
             self.log.close()
 
     def exchange(self, request, count):
         assert self.process is not None
-        fd = self.pairs["cdc1"][0]
+        fd = self.pairs["cdc0"][0]
         os.write(fd, request)
         data = bytearray()
         deadline = time.monotonic() + 10
@@ -70,7 +77,7 @@ class Host:
                 raise RuntimeError(f"host firmware exited; see {self.log.name}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"CDC1 response timed out; see {self.log.name}")
+                raise TimeoutError(f"CDC0 response timed out; see {self.log.name}")
             if select.select([fd], [], [], min(remaining, 0.1))[0]:
                 data.extend(os.read(fd, count - len(data)))
         return bytes(data)
@@ -93,7 +100,7 @@ class Host:
         master, slave = pty.openpty()
         tty.setraw(slave)
         path = self.output / "fakenorflash-flashrom.log"
-        firmware = self.pairs["cdc1"][0]
+        firmware = self.pairs["cdc0"][0]
         process = None
         try:
             with path.open("wb") as log:

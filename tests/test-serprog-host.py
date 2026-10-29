@@ -85,7 +85,7 @@ class SerprogHostTests(unittest.TestCase):
                                  b"\x15\x15\x06")
 
     def test_fragmented_spi_header_and_payload(self):
-        fd = self.host.pairs["cdc1"][0]
+        fd = self.host.pairs["cdc0"][0]
         os.write(fd, b"\x13\x01")
         time.sleep(.05)
         os.write(fd, b"\x00\x00\x03\x00\x00\x9f")

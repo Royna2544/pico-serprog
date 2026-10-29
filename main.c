@@ -20,7 +20,9 @@
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#include <hardware/timer.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifndef MOCK_HARDWARE
 #include "core/panic.h"
@@ -31,17 +33,24 @@
 
 #include <pico/util/queue.h>
 
-queue_t event_queue;
-int count = 0;
+#define WLAN_EVENT_LENGTH 128
+#define WLAN_EVENT_DEPTH 64
+static queue_t event_queue;
+static unsigned int count;
 static void spi_transfer_callback(const struct device *dev, const uint8_t *send,
                                   uint32_t slen, uint8_t *reply,
                                   uint32_t rlen) {
   if (slen > 0) {
     // READ JEDEC ID command (0x9F) is 1 byte, and the response is 3 bytes.
-    char event[128];
+    char event[WLAN_EVENT_LENGTH] = {0};
     if (slen == 1 && send[0] == 0x9F && rlen == 3) {
-      snprintf(event, sizeof(event), "JEDEC_ID: %02X %02X %02X %d", reply[0],
-               reply[1], reply[2], count);
+      int written =
+          snprintf(event, sizeof(event), "JEDEC_ID: %02X %02X %02X %u",
+                   reply[0], reply[1], reply[2], count);
+      if (written < 0 || (size_t)written >= sizeof(event)) {
+        pr_err("SPI event exceeded event buffer");
+        return;
+      }
       pr_debug("%s", event);
       if (!queue_try_add(&event_queue, event)) {
         pr_err("Failed to add event to queue");
@@ -84,39 +93,73 @@ void sigint_handler(int signum) {
 
 #include "esp8266/wlantalk.h"
 
+struct wlantalk_io {
+  struct device *dev;
+  uint64_t deadline;
+  int error;
+};
+
 static int wlantalk_getc_func(void *privdata) {
-  struct device *dev = (struct device *)privdata;
+  struct wlantalk_io *io = privdata;
+  while (!uart_readable(io->dev->parent)) {
+    if (time_us_64() >= io->deadline) {
+      io->error = -ETIMEDOUT;
+      return -1;
+    }
+    sleep_ms(1);
+  }
   uint8_t c;
-  int rc = wlan_talk(dev, NULL, 0, (char *)&c, 1);
+  int rc = wlan_talk(io->dev, NULL, 0, (char *)&c, 1);
   if (rc < 0) {
-    pr_err("Failed to read byte from UART: %d", rc);
+    io->error = rc;
     return -1;
   }
   return (int)c;
 }
 
 static void wlantalk_putc_func(void *privdata, int c) {
-  struct device *dev = (struct device *)privdata;
+  struct wlantalk_io *io = privdata;
+  if (io->error < 0)
+    return;
   uint8_t byte = (uint8_t)c;
-  int rc = wlan_talk(dev, (const char *)&byte, 1, NULL, 0);
-  if (rc < 0) {
-    pr_err("Failed to write byte to UART: %d", rc);
-  }
+  int rc = wlan_talk(io->dev, (const char *)&byte, 1, NULL, 0);
+  if (rc < 0)
+    io->error = rc;
 }
 
-static void wlan_talk_loop(struct device *wlan_dev) {
+static int wlantalk_send(struct wlantalk_io *io, const char *command,
+                         const char *data) {
+  io->error = 0;
+  int rc = make_wlan_talk_message(wlantalk_putc_func, io, command, data);
+  return io->error < 0 ? io->error : rc < 0 ? -EINVAL : 0;
+}
+
+static int wlantalk_receive(struct wlantalk_io *io,
+                            struct wlan_talk_message *msg,
+                            uint32_t timeout_ms) {
+  io->error = 0;
+  io->deadline = time_us_64() + (uint64_t)timeout_ms * 1000;
+  int rc = parse_wlan_talk_message(wlantalk_getc_func, io, msg);
+  return rc < 0 ? (io->error < 0 ? io->error : -EPROTO) : 0;
+}
+
+static int wlan_talk_loop(struct device *wlan_dev) {
+  struct wlantalk_io io = {.dev = wlan_dev};
   struct wlan_talk_message msg;
-#define send(command, data)                                                    \
-  make_wlan_talk_message(wlantalk_putc_func, wlan_dev, command, data)
+#define send(command, data) wlantalk_send(&io, command, data)
 #define is(s) (!strcmp(msg.command, s))
 #define data_is(s) (!strcmp(msg.data, s))
-#define get() parse_wlan_talk_message(wlantalk_getc_func, wlan_dev, &msg)
+#define get() wlantalk_receive(&io, &msg, 15000)
 #define send_get(command, data)                                                \
-  send(command, data);                                                         \
-  if (get() < 0) {                                                             \
-    pr_err("WLAN TALK: " #command " failed");                                  \
-    return;                                                                    \
-  }
+  do {                                                                         \
+    int result = send(command, data);                                          \
+    if (result == 0)                                                           \
+      result = get();                                                          \
+    if (result < 0) {                                                          \
+      pr_err("WLAN TALK: " #command " failed: %d", result);                    \
+      return result;                                                           \
+    }                                                                          \
+  } while (0)
 
   // Slave info
   send_get("SLAVE", "pico-serprog");
@@ -133,7 +176,7 @@ static void wlan_talk_loop(struct device *wlan_dev) {
     pr_info("Slave device STA mode enabled");
   } else {
     pr_err("Slave device STA mode enable failed: %s", msg.data);
-    return;
+    return -EIO;
   }
   send_get("CONN?", "");
   pr_info("Slave device re-check connection status: %s", msg.data);
@@ -150,20 +193,29 @@ static void wlan_talk_loop(struct device *wlan_dev) {
   pr_info("Slave device SD test result: %s", msg.data);
   send_get("SRVIT", "8000");
   pr_info("Slave device Server: %s", msg.data);
-  if (!queue_init(&event_queue, 128, 1)) {
-    pr_err("Failed to initialize event queue");
-    return;
-  }
-
   while (1) {
-    char event_l[128];
+    char event_l[WLAN_EVENT_LENGTH];
     queue_remove_blocking(&event_queue, event_l);
-    send("EVT", event_l);
+    for (int attempt = 1;; attempt++) {
+      int result = send("EVT", event_l);
+      if (result == 0)
+        result = wlantalk_receive(&io, &msg, 2000);
+      if (result == 0 && is("EVT") && data_is("OK"))
+        break;
+      if (result == 0)
+        result = -EPROTO;
+      pr_err("EVT delivery attempt %d failed: %d", attempt, result);
+      if (attempt == 3)
+        return result;
+      sleep_ms(100);
+    }
     pr_info("Sent event to slave device: %s", event_l);
   }
 #undef send
 #undef is
+#undef data_is
 #undef get
+#undef send_get
 }
 
 int main() {
@@ -190,14 +242,16 @@ int main() {
 #ifdef MOCK_HARDWARE
     pr_err("Initialization failed: %d", rc);
     return EXIT_FAILURE;
-#else
-    do_panic("Initialization failed: %d", rc);
 #endif
   }
 
   extern void drvcore_exit(void);
   atexit(drvcore_exit);
 
+  if (!queue_init(&event_queue, WLAN_EVENT_LENGTH, WLAN_EVENT_DEPTH)) {
+    pr_err("Failed to initialize event queue");
+    return EXIT_FAILURE;
+  }
   multicore_launch_core1(core1_entry);
 #ifdef MOCK_HARDWARE
   signal(SIGINT, sigint_handler);
@@ -231,11 +285,14 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  wlan_set_boot_mode(wlan_dev, bootmode);
+  rc = wlan_set_boot_mode(wlan_dev, bootmode);
+  if (rc < 0) {
+    pr_err("Failed to set WLAN boot mode: %d", rc);
+    return EXIT_FAILURE;
+  }
   switch (bootmode) {
   case WLAN_BOOT_NORMAL: {
-    wlan_talk_loop(wlan_dev);
-    break;
+    return wlan_talk_loop(wlan_dev) < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
   }
   case WLAN_BOOT_UPLOAD: {
     struct device *passthru_dev = device_find_by_alias("passthru0");

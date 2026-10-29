@@ -152,7 +152,7 @@ static void handle_spi(const struct serprog_platform_data *pdata) {
   if (spi_chip_deassert_cs(pdata->spi_chip) != 0)
     ok = false;
 
-  if (pdata->spi_transfer_callback)
+  if (ok && pdata->spi_transfer_callback)
     pdata->spi_transfer_callback(pdata->spi_chip, send, slen, reply, rlen);
 
   usb_cdc_write_byte(cdc, ok ? S_ACK : S_NAK);

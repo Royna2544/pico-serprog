@@ -39,6 +39,7 @@ extern "C" {
 typedef struct {
   int element_size;  //!< Size of each element in the queue
   int element_count; //!< Maximum number of elements in the queue
+  void *impl;        //!< Host-only per-queue storage and synchronization
 } queue_t;
 
 /*! \brief Initialise a queue, allocating a (possibly shared) spinlock

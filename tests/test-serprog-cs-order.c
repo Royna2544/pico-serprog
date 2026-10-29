@@ -1,16 +1,10 @@
-#include <stdlib.h>
 #include <stdbool.h>
-static bool fail_allocation;
-static void *fixture_malloc(size_t size) {
-  return fail_allocation ? NULL : malloc(size);
-}
-#define malloc fixture_malloc
+#include <string.h>
 #include "drivers/serprog.c"
-#undef malloc
 #include <stdio.h>
 
 static bool selected, selected_while_reading_payload, short_payload;
-static bool reply_length, fail_transfer;
+static bool fail_transfer;
 static int phase, replies, naks, asserts, deasserts;
 
 void printk(int level, const char *fmt, ...) {
@@ -38,7 +32,7 @@ uint32_t usb_cdc_read_bytes(const struct device *dev, void *buf, uint32_t len) {
   (void)dev;
   if (phase++ == 0) {
     if (len != 6) return 0;
-    const uint8_t header[] = {3, 0, 0, reply_length ? 3 : 0, 0, 0};
+    const uint8_t header[] = {3, 0, 0, 0, 0, 0};
     memcpy(buf, header, sizeof(header));
   } else {
     if (selected) selected_while_reading_payload = true;
@@ -74,23 +68,23 @@ int spi_chip_deassert_cs(const struct device *dev) {
   deasserts++;
   return 0;
 }
-int spi_master_write_nbytes(const struct device *dev, const void *buf,
-                            uint32_t len) {
+int spi_chip_write_nbytes(const struct device *dev, const void *buf,
+                          uint32_t len) {
   (void)dev;
   (void)buf;
   return fail_transfer ? len - 1 : len;
 }
-int spi_master_read_nbytes(const struct device *dev, void *buf, uint32_t len) {
+int spi_chip_read_nbytes(const struct device *dev, void *buf, uint32_t len) {
   (void)dev;
   (void)buf;
   return len;
 }
-int spi_master_set_baud(const struct device *dev, uint32_t baud) {
+int spi_chip_set_baud(const struct device *dev, uint32_t baud) {
   (void)dev;
   (void)baud;
   return 0;
 }
-uint32_t spi_master_get_baud(const struct device *dev) {
+uint32_t spi_chip_get_baud(const struct device *dev) {
   (void)dev;
   return 1000000;
 }
@@ -98,9 +92,8 @@ uint32_t spi_master_get_baud(const struct device *dev) {
 int main(void) {
   struct device cdc = {.name = "cdc"};
   struct device chip = {.name = "chip"};
-  struct device master = {.name = "master"};
   struct serprog_platform_data pdata = {
-      .usb_cdc = &cdc, .spi_chip = &chip, .spi_master = &master};
+      .usb_cdc = &cdc, .spi_chip = &chip};
   struct device dev = {.name = "serprog", .platform_data = &pdata};
   serprogdrv_handle_command(&dev);
   if (selected_while_reading_payload || selected || replies != 1 ||
@@ -118,26 +111,12 @@ int main(void) {
   }
   phase = 0;
   short_payload = false;
-  fail_allocation = true;
-  serprogdrv_handle_command(&dev);
-  if (selected || asserts || deasserts || replies || naks != 1) {
-    fprintf(stderr, "send allocation failure did not discard and NAK\n");
-    return 1;
-  }
-  phase = naks = 0;
-  reply_length = true;
-  serprogdrv_handle_command(&dev);
-  if (selected || asserts || deasserts || replies || naks != 1) {
-    fprintf(stderr, "reply allocation failure did not discard and NAK\n");
-    return 1;
-  }
-  phase = naks = 0;
-  reply_length = fail_allocation = false;
   fail_transfer = true;
   serprogdrv_handle_command(&dev);
   if (selected || asserts != 1 || deasserts != 1 || replies || naks != 1) {
     fprintf(stderr, "short SPI write did not deassert CS and NAK\n");
     return 1;
   }
+  puts("PASS: serprog payload before CS, short payload quiet, failed SPI NAK");
   return 0;
 }

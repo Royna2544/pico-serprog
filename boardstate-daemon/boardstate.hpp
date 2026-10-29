@@ -12,7 +12,7 @@
 // UART <board> TX|RX <byte for TX>; RX returns -1 when empty.
 // RESET pico restores the Pico's power-on GPIO state and resets the wired ESP.
 // POWER|MODE|BOOT esp queries sketch availability, boot mode, boot generation.
-// <board> is pico or esp; values are physical (not active-low logical).
+// <board> is pico, esp, or the DT-wired Uno pin; values are physical.
 // Errors start with ERR. UART bytes are decimal, not newline-delimited data.
 struct Pin {
   std::string function = "sio";
@@ -30,6 +30,8 @@ struct BoardState {
   enum class ESPMode { Off, Flash, Rom, Invalid };
   std::array<Pin, 30> pico;
   std::array<Pin, 19> esp; // 0..16 GPIO; 17 CHIP_EN, 18 EXT_RSTB
+  Pin uno;
+  int uno_pin = -1, uno_pico_pin = -1;
   std::array<uint8_t, 30> irq_edges{};
   std::array<uint8_t, 30> irq_enabled{};
   std::deque<unsigned char> pico_rx;
@@ -40,6 +42,7 @@ struct BoardState {
   ESPMode mode = ESPMode::Off;
   bool reset_released = false;
   bool rom_gpio2_risk_logged = false;
+  bool verbose = false;
   unsigned int boot_generation = 0;
 
   explicit BoardState(const std::string &dtb);

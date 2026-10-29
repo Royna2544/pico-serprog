@@ -86,8 +86,12 @@ static int uartdrv_read_nbytes(const struct device *dev, uint8_t *dst,
                                size_t len) {
   const struct uart_platform_data *pdata = dev->platform_data;
   if (pdata->acquired) {
+#ifdef MOCK_HARDWARE
+    return uart_read_blocking(pdata->hw, dst, len);
+#else
     uart_read_blocking(pdata->hw, dst, len);
     return len;
+#endif
   } else {
     dev_err(dev, "%s: UART not acquired", __func__);
     return -ENODEV;
@@ -98,8 +102,12 @@ int uartdrv_write_nbytes(const struct device *dev, const uint8_t *src,
                          size_t len) {
   const struct uart_platform_data *pdata = dev->platform_data;
   if (pdata->acquired) {
+#ifdef MOCK_HARDWARE
+    return uart_write_blocking(pdata->hw, src, len);
+#else
     uart_write_blocking(pdata->hw, src, len);
     return len;
+#endif
   } else {
     dev_err(dev, "%s: UART not acquired", __func__);
     return -ENODEV;
@@ -112,7 +120,14 @@ int uartdrv_read_nbytes_nonblocking(const struct device *dev, uint8_t *dst,
   if (pdata->acquired) {
     size_t bytes_read = 0;
     while (bytes_read < len && uart_is_readable(pdata->hw)) {
+#ifdef MOCK_HARDWARE
+      int byte = uart_getc(pdata->hw);
+      if (byte < 0)
+        return byte;
+      dst[bytes_read++] = (uint8_t)byte;
+#else
       dst[bytes_read++] = uart_getc(pdata->hw);
+#endif
     }
     return bytes_read;
   } else {
@@ -127,7 +142,17 @@ int uartdrv_write_nbytes_nonblocking(const struct device *dev,
   if (pdata->acquired) {
     size_t bytes_written = 0;
     while (bytes_written < len && uart_is_writable(pdata->hw)) {
+#ifdef MOCK_HARDWARE
+      /* Mock uart_putc sign-extends 0xff to -1; use the byte-count API. */
+      int written = uart_write_blocking(pdata->hw, &src[bytes_written], 1);
+      if (written < 0)
+        return written;
+      if (written == 0)
+        break;
+      bytes_written++;
+#else
       uart_putc(pdata->hw, src[bytes_written++]);
+#endif
     }
     return bytes_written;
   } else {

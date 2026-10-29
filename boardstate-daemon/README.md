@@ -1,7 +1,8 @@
 # Virtual Pico ↔ ESP8266 board
 
-The host build links the existing Pico firmware to `mock-pico-sdk`, and compiles
-`esp8266/esp8266.ino` with `mock-esp8266-sdk`. The sketch is also a normal
+The host build links the existing Pico firmware to `mock-pico-sdk`, compiles
+`esp8266/esp8266.ino` with `mock-esp8266-sdk`, and runs the actual
+`vpmic/vpmic.ino` against its Uno GPIO shim. The ESP sketch is also a normal
 ESP8266 Arduino sketch: the mock `Arduino.h` is only on the host target's
 include path. Do **not** add that directory to a real Arduino build.
 
@@ -15,6 +16,13 @@ The physical UART connections are GP8 (UART1 TX) → ESP U0RXD/GPIO3 and
 ESP U0TXD/GPIO1 → GP9 (UART1 RX), with common ground and 3.3 V logic.
 GP18 → CHIP_EN, GP19 → EXT_RSTB, GP20 → GPIO0, GP21 → GPIO2, and
 GP22 → GPIO15 are also connected bidirectionally in the daemon's pin model.
+The host-only `dts/mock-board.dts` models Uno D2 driving an NPN base with a
+pulldown. Its grounded emitter and collector on Pico GP6 pull that input low
+when D2 is high; a separate 3.3 V resistor pulls GP6 high when the NPN is off.
+The Pico trigger GPIO descriptor is active-low, so collector LOW reads as
+logical active. This models the switch and sketch, not an entire AVR.
+The mock wiring node has no `compatible`: the daemon reads the compiled DTB,
+but Pico's driver core must not register host-only metadata as an unbound device.
 
 Verified against downloaded primary datasheets:
 
@@ -33,42 +41,74 @@ Verified against downloaded primary datasheets:
 ## Build and test
 
     cmake -S . -B build-host -DMOCK_HARDWARE=ON
-    cmake --build build-host --target boardstate-daemon pico_serprog esp8266-mock boardstate-pico-smoke boardstate-pico-irq esp-restart-probe boardstate-wlan-host -j4
+    cmake --build build-host --target unified_daemon boardstate-daemon pico_serprog esp8266-mock vpmic-mock boardstate-pico-smoke boardstate-pico-irq esp-restart-probe boardstate-wlan-host -j4
+    python tests/test-unified-daemon.py
+    python tests/test-unified-child-exit.py
+    python tests/test-unified-hard-kill.py
+    python tests/test-vpmic-board.py
+    python tests/test-vpmic-host.py
+    python tests/test-boardstate-verbose.py
+    python tests/test-wlan-autoboot-timeout.py
+    python tests/test-wlan-reentry.py
+    python tests/test-jedec-evt-host.py
+    bash tests/test-event-fixtures.sh
+    python tests/test-serprog-host.py -v
+    python tests/testfakenorflash-host.py
     python tests/test-boardstate.py
     python tests/test-esp-rom.py
     python tests/test-boardstate-irq.py
     python tests/test-boardstate-reset.py
     python tests/test-boardstate-errors.py
 
-The test starts all three processes, creates temporary PTYs for the Pico's
+The boardstate test starts the daemon, ESP and Pico processes, creates temporary PTYs for the Pico's
 existing UART0/CDC mocks, checks GPIO polarity/contention and ESP boot gating,
-then echoes binary bytes through the Pico UART mock and the **same sketch**
+then exchanges a length-framed SLAVE/MASTER message with the **same sketch**
 compiled with the ESP mock. It cleans up its sockets, PTYs and processes.
 The second test checks boot-strap sampling, GPIO2 ownership and contention,
 normal/invalid modes, quick-reset sketch restart, and daemon transition logs.
 The first test also runs the real WLAN driver upload transition through a
-host-only firmware entry point and checks the Pico GP21 drive state against
-the daemon's ROM GPIO2 output. A high Pico output does not fight the UART's
-idle-high level, but the daemon warns because ROM TX may subsequently go low.
+host-only firmware entry point and checks that GP21 is an input while the ROM
+owns GPIO2 TX. It deliberately drives GP21 afterward to test the daemon's
+contention-risk warning.
 The host test sets `MOCK_PTY_DIR` to its private directory rather than touching
 another instance's `/tmp/mock-*` links.
-The Pico application initializes the ESP in NONE/off mode; it does not
-currently request NORMAL mode on its own.
+The JEDEC event test pauses a scripted ESP UART responder during the real Pico
+handshake, submits two serprog CDC0 SPI requests, rejects one EVT acknowledgment,
+and verifies the first event is retried before the second is sent. The ordinary
+boardstate test also checks the real ESP sketch's `EVT:OK` reply. Host serprog
+tests use the unified runner's private `host-cdc0` link instead of obsolete
+global CDC1 PTYs.
+The DTS currently enables ESP autoboot; the Pico samples the bootmode switch
+and brings up NORMAL mode when the switch reads as normal. The ROM/upload
+driver fixture transitions through NONE before requesting UPLOAD.
+The initial `bootmode-source` miss is retried after the switch device registers;
+it is not a terminal Wi-Fi probe failure. Without an ESP firmware-ready IRQ,
+the WLAN driver now times out, powers EN off and fails startup rather than
+waiting forever. `display` still defers because no `nxp,pcf8574t` driver exists
+in this tree; implement that driver or disable the display node when unused.
 
-For manual development, start `build-host/boardstate-daemon build-host/board.dtb
-/tmp/boardstate-daemon.sock`, `build-host/esp8266-mock`, the existing
-`bash start-host` (for UART0 and CDC PTYs only), then `build-host/pico_serprog` in
-separate terminals. Start the daemon first. `start-host` does not create a
-UART1 PTY: UART1 uses the daemon. To bring up the ESP manually after Pico
-initialization, use `python boardstate-daemon/ctl.py GPIO pico PIN PUT VALUE`
-for pins 20=1 (GPIO0), 21=1 (GPIO2), 22=0 (GPIO15), 19=1 (reset released),
-18=1 (enable), in that order. The driver itself still believes it is in
-NONE mode; this manual override is for host firmware experiments, **not**
-a hardware control sequence. `python boardstate-daemon/ctl.py POWER esp`
-returns 1 when the sketch can run. Set `BOARDSTATE_SOCKET` for a private
-socket path (both clients and `ctl.py`); pass the same path as the daemon's
-second argument. Stop the processes when finished, and remove only stale
-sockets/PTY links you created, never another user's socket.
+For an all-in-one host run:
+
+    build-host/unified_daemon --verbose build-host
+
+The supervisor starts four private PTY relays, the DT-backed board daemon,
+the Uno sketch, the ESP sketch, and the Pico firmware in dependency order.
+It prints `BOARDSTATE_SOCKET` and `MOCK_PTY_DIR`; set the former when using
+`boardstate-daemon/ctl.py`. The run directory also exposes `host-cdc0..2`
+and `host-uart0` PTY links. SIGINT/SIGTERM shuts down every child and removes
+its own links/socket; it never unlinks someone else's global `/tmp` links.
+SIGKILL also terminates direct children via Linux parent-death signals, but
+the supervisor cannot remove its private links after an uncatchable SIGKILL.
+`--verbose` adds `pico> pin ...`, `uno> pin ...` and hex-byte
+`uart> pico->esp [xx]` / `uart> esp->pico [xx]` diagnostics. A TX accepted
+while the ESP is off or RX is unmuxed is labeled discarded/not received.
+
+For daemon-only experiments, start `build-host/boardstate-daemon` with the
+compiled DTB and a private socket path, then set `BOARDSTATE_SOCKET` for
+`boardstate-daemon/ctl.py` and clients. The Pico firmware now autoboots the
+ESP; do not manually override its GPIOs while it is running. UART1 uses the
+daemon rather than a PTY. The old `start-host` script creates global `/tmp`
+links and is not needed when using the supervisor.
 
 To build for the physical ESP8266 with an installed ESP8266 Arduino core:
 
@@ -88,10 +128,8 @@ boot-log bytes, UART bit timing or flash image execution is implemented: Pico
 UART TX bytes sent in ROM mode or while ESP is off are accepted but discarded.
 The daemon logs `Entered bootrom upload mode`, `booting normal mode`, reset and
 invalid straps to stderr. A pull-up on GPIO2 is safe for the ROM transmitter;
-the existing Pico driver instead drives GP21 high as an output and should
-release it after sampling before an actual ROM transmission pulls GPIO2 low.
-The daemon emits a once-per-boot contention-risk warning when GP21 remains an
-output in ROM mode, including when software enables that output after boot.
+the Pico driver releases GP21 to input in upload mode. The daemon emits a
+once-per-boot contention-risk warning if software drives it after boot.
 GPIO0 is also held high by the current Pico driver in normal mode: do not drive
 ESP GPIO0 low as a firmware-ready acknowledgment against that output.
 GPIO writes from the ESP sketch are rejected while disabled, in ROM mode or
@@ -105,6 +143,7 @@ One short ASCII request per connection, one newline-terminated response.
     GPIO pico|esp PIN DIR 0|1
     GPIO pico|esp PIN PUT 0|1
     GPIO pico|esp PIN PULL 00|01|10|11
+    GPIO uno 2 MUX sio|DIR 0|1|PUT 0|1|PULL 00|01|10|11|GET|FUNCTION|DRIVE
     GPIO pico|esp PIN GET
     GPIO pico|esp PIN FUNCTION
     GPIO pico|esp PIN DRIVE

@@ -2,6 +2,16 @@
 
 /include/ "common.dtsi"
 
+&{/} {
+    vpmic0: vpmic-uno {
+        royna,npn-vpmic-wiring;          // Host-only wiring, not a Pico driver
+        uno-pin = <2>;
+        collector-gpios = <&gpio0 6 0>; // NPN collector -> Pico GP6
+        collector-pull-up;             // 3.3 V external pull-up
+        base-pull-down;                 // Uno D2 -> NPN base, pulldown to GND
+    };
+};
+
 &{/aliases} {
     serprogfake1 = &serprogfake1;
 };

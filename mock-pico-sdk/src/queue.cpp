@@ -1,184 +1,130 @@
 #include "pico/util/queue.h"
+
+#include <condition_variable>
 #include <cstdint>
-#include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <queue>
+#include <limits>
+#include <mutex>
+#include <new>
+#include <stdexcept>
+#include <vector>
 
-#include <unordered_map>
+namespace {
+struct QueueState {
+  QueueState(size_t element_size, size_t capacity)
+      : storage(element_size * capacity), element_size(element_size),
+        capacity(capacity) {}
 
-static std::unordered_map<queue_t *, std::queue<std::vector<uint8_t>>> queues;
+  std::mutex mutex;
+  std::condition_variable not_empty;
+  std::condition_variable not_full;
+  std::vector<uint8_t> storage;
+  const size_t element_size;
+  const size_t capacity;
+  size_t head = 0;
+  size_t count = 0;
+};
+
+QueueState *state(queue_t *q) {
+  return q ? static_cast<QueueState *>(q->impl) : nullptr;
+}
+
+bool add(queue_t *q, const void *data, bool block) {
+  QueueState *s = state(q);
+  if (!s) return false;
+  std::unique_lock<std::mutex> lock(s->mutex);
+  if (block) {
+    s->not_full.wait(lock, [&] { return s->count < s->capacity; });
+  } else if (s->count == s->capacity) {
+    return false;
+  }
+  size_t tail = (s->head + s->count) % s->capacity;
+  std::memcpy(s->storage.data() + tail * s->element_size, data, s->element_size);
+  ++s->count;
+  lock.unlock();
+  s->not_empty.notify_one();
+  return true;
+}
+
+bool remove(queue_t *q, void *data, bool block, bool peek) {
+  QueueState *s = state(q);
+  if (!s) return false;
+  std::unique_lock<std::mutex> lock(s->mutex);
+  if (block) {
+    s->not_empty.wait(lock, [&] { return s->count != 0; });
+  } else if (s->count == 0) {
+    return false;
+  }
+  if (data)
+    std::memcpy(data, s->storage.data() + s->head * s->element_size,
+                s->element_size);
+  if (!peek) {
+    s->head = (s->head + 1) % s->capacity;
+    --s->count;
+    lock.unlock();
+    s->not_full.notify_one();
+  }
+  return true;
+}
+} // namespace
 
 extern "C" {
-/*! \brief Initialise a queue, allocating a (possibly shared) spinlock
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \param element_size Size of each value in the queue
- * \param element_count Maximum number of entries in the queue
- * \return true if the queue was initialized; false if it couldn't be (e.g.
- * malloc failed)
- */
 bool queue_init(queue_t *q, int element_size, int element_count) {
-  queues[q] = std::queue<std::vector<uint8_t>>();
+  if (!q || element_size <= 0 || element_count < 0 ||
+      static_cast<size_t>(element_count) >
+          std::numeric_limits<size_t>::max() / static_cast<size_t>(element_size))
+    return false;
+  // As with the SDK, reinitializing an initialized queue requires queue_free.
+  q->impl = nullptr;
+  try {
+    q->impl = new QueueState(static_cast<size_t>(element_size),
+                             static_cast<size_t>(element_count));
+  } catch (const std::bad_alloc &) {
+    return false;
+  } catch (const std::length_error &) {
+    return false;
+  }
   q->element_size = element_size;
   q->element_count = element_count;
   return true;
 }
 
-/*! \brief Destroy the specified queue.
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- *
- * Does not deallocate the queue_t structure itself.
- */
-void queue_free(queue_t *q) { queues.erase(q); }
+void queue_free(queue_t *q) {
+  if (!q) return;
+  delete state(q);
+  q->impl = nullptr;
+}
 
-/*! \brief Check if queue is empty
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \return true if queue is empty, false otherwise
- *
- * This function is interrupt and multicore safe.
- */
-bool queue_is_empty(queue_t *q) { return queues[q].empty(); }
+bool queue_is_empty(queue_t *q) {
+  QueueState *s = state(q);
+  if (!s) return true;
+  std::lock_guard<std::mutex> lock(s->mutex);
+  return s->count == 0;
+}
 
-/*! \brief Check if queue is full
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \return true if queue is full, false otherwise
- *
- * This function is interrupt and multicore safe.
- */
 bool queue_is_full(queue_t *q) {
-  return false; // For simplicity, we won't implement a maximum size for the
-                // mock queue
+  QueueState *s = state(q);
+  if (!s) return false;
+  std::lock_guard<std::mutex> lock(s->mutex);
+  return s->count == s->capacity;
 }
 
-// nonblocking queue access functions:
-
-/*! \brief Non-blocking add value queue if not full
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \param data Pointer to value to be copied into the queue
- * \return true if the value was added
- *
- * If the queue is full this function will return immediately with false,
- * otherwise the data is copied into a new value added to the queue, and this
- * function will return true.
- */
-bool queue_try_add(queue_t *q, const void *data) {
-  if (queue_is_full(q))
-    return false;
-  std::vector<uint8_t> value(reinterpret_cast<const uint8_t *>(data),
-                             reinterpret_cast<const uint8_t *>(data) +
-                                 q->element_size);
-  queues[q].push(value);
-  return true;
-}
-
-/*! \brief Non-blocking removal of entry from the queue if non empty
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \param data Pointer to the location to receive the removed value, or NULL if
- * the data isn't required
- * \return true if a value was removed
- *
- * If the queue is not empty function will copy the removed value into the
- * location provided and return immediately with true, otherwise the function
- * will return immediately with false.
- */
+bool queue_try_add(queue_t *q, const void *data) { return add(q, data, false); }
 bool queue_try_remove(queue_t *q, void *data) {
-  if (queue_is_empty(q))
-    return false;
-  if (data) {
-    std::vector<uint8_t> value = queues[q].front();
-    std::memcpy(data, value.data(), value.size());
-    printf("queue_try_remove: removed value of size %zu\n", value.size());
-  }
-  queues[q].pop();
-  return true;
+  return remove(q, data, false, false);
 }
-
-/*! \brief Non-blocking peek at the next item to be removed from the queue
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \param data Pointer to the location to receive the peeked value, or NULL if
- * the data isn't required
- * \return true if there was a value to peek
- *
- * If the queue is not empty this function will return immediately with true
- * with the peeked entry copied into the location specified by the data
- * parameter, otherwise the function will return false.
- */
 bool queue_try_peek(queue_t *q, void *data) {
-  if (queue_is_empty(q))
-    return false;
-  if (data) {
-    std::vector<uint8_t> value = queues[q].front();
-    std::memcpy(data, value.data(), value.size());
-  }
-  return true;
+  return remove(q, data, false, true);
 }
 
-// blocking queue access functions:
-
-/*! \brief Blocking add of value to queue
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \param data Pointer to value to be copied into the queue
- *
- * If the queue is full this function will block, until a removal happens on the
- * queue
- *
- * \note Because this method can block, prefer \ref queue_try_add in an IRQ
- * context
- */
 void queue_add_blocking(queue_t *q, const void *data) {
-  while (!queue_try_add(q, data)) {
-    // In a real implementation, you might want to yield or sleep here
-  }
+  if (!add(q, data, true)) std::abort(); // SDK requires a successfully initialized queue
 }
-
-/*! \brief Blocking remove entry from queue
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \param data Pointer to the location to receive the removed value, or NULL if
- * the data isn't required
- *
- * If the queue is empty this function will block until a value is added.
- *
- * \note Because this method can block, prefer \ref queue_try_remove in an IRQ
- * context
- */
 void queue_remove_blocking(queue_t *q, void *data) {
-  while (!queue_try_remove(q, data)) {
-    // In a real implementation, you might want to yield or sleep here
-  }
+  if (!remove(q, data, true, false)) std::abort();
 }
-
-/*! \brief Blocking peek at next value to be removed from queue
- *  \ingroup queue
- *
- * \param q Pointer to a queue_t structure, used as a handle
- * \param data Pointer to the location to receive the peeked value, or NULL if
- * the data isn't required
- *
- * If the queue is empty function will block until a value is added
- *
- * \note Because this method can block, prefer \ref queue_try_peek in an IRQ
- * context
- */
 void queue_peek_blocking(queue_t *q, void *data) {
-  while (!queue_try_peek(q, data)) {
-    // In a real implementation, you might want to yield or sleep here
-  }
+  if (!remove(q, data, true, true)) std::abort();
 }
 }

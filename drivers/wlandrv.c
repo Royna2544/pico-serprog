@@ -6,7 +6,7 @@
 #include "drivers/latched-switch.h"
 #include <drivers/uartdrv.h>
 #include <hardware/gpio.h>
-#include <hardware/sync.h>
+#include <hardware/timer.h>
 #include <pico/time.h>
 #include <string.h>
 #include <sys/errno.h>
@@ -21,6 +21,7 @@ struct esp8266_platform_data {
   struct gpio_desc *gpio15_pin;
   int bootpin_irq;
   bool autoboot_enabled;
+  bool ready_irq_armed;
 
   enum wlan_driver_boot_mode cur_boot_mode;
 };
@@ -114,9 +115,9 @@ static int esp8266_probe(struct device *dev) {
            pdata->autoboot_enabled ? "enabled" : "disabled");
   dev->platform_data = pdata;
 
-  if (esp8266_boot(dev, WLAN_BOOT_NONE)) {
+  rc = esp8266_boot(dev, WLAN_BOOT_NONE);
+  if (rc) {
     dev_err(dev, "Failed to initialize ESP8266 in NONE mode");
-    rc = -EINVAL;
     goto release_gpios;
   }
 
@@ -136,10 +137,9 @@ static int esp8266_probe(struct device *dev) {
     }
     enum wlan_driver_boot_mode bootmode =
         switch_state ? WLAN_BOOT_NORMAL : WLAN_BOOT_UPLOAD;
-    if (esp8266_boot(dev, bootmode)) {
-      dev_err(dev, "Failed to initialize ESP8266 in mode: %d",
-              pdata->cur_boot_mode);
-      rc = -EINVAL;
+    rc = esp8266_boot(dev, bootmode);
+    if (rc) {
+      dev_err(dev, "Failed to initialize ESP8266 in mode: %d", bootmode);
       goto release_gpios;
     }
     rc = latched_switch_set_on_change_callback(
@@ -153,13 +153,15 @@ static int esp8266_probe(struct device *dev) {
   dev_info(dev, "ESP8266 probed successfully.");
   return 0;
 release_gpios:
-  devm_free_irq(dev, pdata->bootpin_irq);
+  if (pdata->ready_irq_armed)
+    devm_free_irq(dev, pdata->bootpin_irq);
   gpio_desc_release(dev, pdata->en_pin);
   gpio_desc_release(dev, pdata->rst_pin);
   gpio_desc_release(dev, pdata->gpio0_pin);
   gpio_desc_release(dev, pdata->gpio2_pin);
   gpio_desc_release(dev, pdata->gpio15_pin);
 free_pdata:
+  dev->platform_data = NULL;
   free(pdata);
   return rc;
 }
@@ -193,6 +195,10 @@ static int esp8266_boot(struct device *dev, enum wlan_driver_boot_mode mode) {
               pdata->cur_boot_mode);
       return -EINVAL;
     }
+    if (pdata->ready_irq_armed) {
+      devm_free_irq(dev, pdata->bootpin_irq);
+      pdata->ready_irq_armed = false;
+    }
     // Set initial states
     gpio_set_value(pdata->gpio0_pin, 0);  // Active-low boot pin: GPIO0 high
     gpio_set_value(pdata->gpio2_pin, 1);  // Set GPIO2 high
@@ -215,6 +221,7 @@ static int esp8266_boot(struct device *dev, enum wlan_driver_boot_mode mode) {
       dev_err(dev, "Failed to request IRQ for ESP8266: %d", rc);
       return rc;
     }
+    pdata->ready_irq_armed = true;
     gpio_set_value(pdata->gpio0_pin, 0);  // Active-low boot pin: GPIO0 high
     gpio_set_value(pdata->gpio2_pin, 1);  // Set GPIO2 high
     gpio_set_value(pdata->gpio15_pin, 1); // Set GPIO15 enabled (low)
@@ -224,9 +231,17 @@ static int esp8266_boot(struct device *dev, enum wlan_driver_boot_mode mode) {
     dev_info(dev, "ESP8266 waiting firmare ack..");
     gpio_reset(pdata->gpio15_pin); // Reset GPIO15 to default state (Hi-Z input)
 
-    do {
-      __wfi(); // Wait for interrupt
-    } while (!esp8266_ready);
+    uint64_t deadline = time_us_64() + 2000000;
+    while (!esp8266_ready && time_us_64() < deadline)
+      sleep_ms(1);
+    if (!esp8266_ready) {
+      dev_err(dev, "ESP8266 firmware ack timed out");
+      gpio_set_value(pdata->en_pin, 0);
+      gpio_set_value(pdata->rst_pin, 1);
+      devm_free_irq(dev, pdata->bootpin_irq);
+      pdata->ready_irq_armed = false;
+      return -ETIMEDOUT;
+    }
 
     // Release GPIO2 and GPIO15 to their default states, going back to Hi-Z
     // input mode
@@ -340,6 +355,10 @@ static int esp8266_talk(struct device *dev, const char *data, size_t len,
       dev_err(dev, "Failed to write to UART for ESP8266 talk: %d", written);
       return written;
     }
+    if ((size_t)written != len) {
+      dev_err(dev, "Short UART write for ESP8266 talk: %d/%zu", written, len);
+      return -EIO;
+    }
   }
 
   if (response) {
@@ -348,6 +367,11 @@ static int esp8266_talk(struct device *dev, const char *data, size_t len,
     if (read < 0) {
       dev_err(dev, "Failed to read from UART for ESP8266 talk: %d", read);
       return read;
+    }
+    if ((size_t)read != response_len) {
+      dev_err(dev, "Short UART read for ESP8266 talk: %d/%zu", read,
+              response_len);
+      return -EIO;
     }
   }
 
@@ -367,7 +391,8 @@ static void esp8266_remove(struct device *dev) {
   gpio_desc_release(dev, pdata->gpio2_pin);
   gpio_desc_release(dev, pdata->gpio15_pin);
 
-  devm_free_irq(dev, pdata->bootpin_irq);
+  if (pdata->ready_irq_armed)
+    devm_free_irq(dev, pdata->bootpin_irq);
 
   free(pdata);
   dev->platform_data = NULL;
@@ -389,15 +414,17 @@ struct esp8266_driver esp8266_drv = {
 
 PLATFORM_DRIVER(esp8266_drv);
 
-void wlan_set_boot_mode(struct device *device,
-                        enum wlan_driver_boot_mode mode) {
+int wlan_set_boot_mode(struct device *device,
+                       enum wlan_driver_boot_mode mode) {
+  if (!device || !device->drv)
+    return -EINVAL;
   struct esp8266_driver *drv =
       container_of(device->drv, struct esp8266_driver, drv);
   if (!drv || !drv->boot) {
     dev_err(device, "ESP8266 driver does not support boot");
-    return;
+    return -ENOSYS;
   }
-  drv->boot(device, mode);
+  return drv->boot(device, mode);
 }
 
 int wlan_talk(struct device *device, const char *data, size_t len,

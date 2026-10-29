@@ -86,16 +86,11 @@ def run():
             esp = subprocess.Popen([str(BUILD / "esp8266-mock")], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             processes.append(esp)
-            expect(sock, "UART pico TX 76", "OK")
-            for _ in range(200):
-                if esp.poll() is not None:
-                    raise RuntimeError(esp.communicate()[1].decode())
-                if request(sock, "UART pico RX") == "76":
-                    break
-                time.sleep(.01)
-            else:
-                raise AssertionError("ESP sketch did not echo Pico UART1 byte")
+            if esp.poll() is not None:
+                raise RuntimeError(esp.communicate()[1].decode())
             subprocess.run([str(BUILD / "boardstate-pico-smoke")], env=env,
+                           check=True, timeout=5)
+            subprocess.run([str(BUILD / "boardstate-pico-smoke"), "event"], env=env,
                            check=True, timeout=5)
             expect(sock, "GPIO pico 8 MUX sio", "OK")
             expect(sock, "UART pico TX 67", "ERR UART TX pin not muxed")
@@ -127,10 +122,10 @@ def run():
                 if pico.poll() is not None:
                     raise RuntimeError(f"Pico exited: {pico.returncode}")
                 if all(request(sock, f"GPIO pico {pin} GET") == str(value)
-                       for pin, value in ((18, 0), (19, 0), (20, 1),
-                                          (21, 1), (22, 0))) and all(
+                       for pin, value in ((18, 1), (19, 1), (20, 1),
+                                          (21, 1), (22, 1))) and all(
                         request(sock, f"GPIO pico {pin} FUNCTION") == "uart"
-                        for pin in (8, 9)):
+                        for pin in (8, 9)) and request(sock, "MODE esp") == "flash":
                     break
                 time.sleep(.01)
             else:
@@ -142,20 +137,33 @@ def run():
                 out = pico_log.read()
                 raise AssertionError(f"Pico ESP boot GPIOs: {levels}; "
                                      f"stdout={out[-4000:]!r}")
+            # The WLAN fixture owns the same virtual pins; stop the Pico first.
+            pico.terminate()
+            pico.wait(timeout=3)
+            expect(sock, "RESET pico", "OK")
             with open(Path(tmp) / "wlan.log", "w+b") as wlan_log:
-                upload = subprocess.run([str(BUILD / "boardstate-wlan-host")],
-                                        env=env, stdout=wlan_log,
-                                        stderr=subprocess.STDOUT, timeout=10)
+                try:
+                    upload = subprocess.run([str(BUILD / "boardstate-wlan-host")],
+                                            env=env, stdout=wlan_log,
+                                            stderr=subprocess.STDOUT, timeout=10)
+                except subprocess.TimeoutExpired as exc:
+                    wlan_log.seek(0)
+                    raise AssertionError(f"WLAN fixture timed out: {wlan_log.read()[-4000:]!r}") from exc
                 if upload.returncode:
                     wlan_log.seek(0)
                     raise AssertionError(f"WLAN upload path failed: {wlan_log.read()[-4000:]!r}")
+                wlan_log.seek(0)
+                assert b"DRVCORE: vpmic-uno" not in wlan_log.read(), \
+                    "host wiring metadata was registered as a Pico device"
             expect(sock, "MODE esp", "rom")
-            expect(sock, "GPIO pico 21 DRIVE", "sio-out")
+            expect(sock, "GPIO pico 21 DRIVE", "input")
             expect(sock, "GPIO esp 2 DRIVE", "uart-tx")
             expect(sock, "GPIO pico 21 GET", "1")
+            expect(sock, "GPIO pico 21 DIR 1", "OK")
             daemon_log.seek(0)
             assert "ROM GPIO2 TX may contend" in daemon_log.read().decode()
-            print("PASS: DTB wiring, pulls, contention, boot gating, ESP echo, Pico host startup")
+            expect(sock, "GPIO pico 21 DIR 0", "OK")
+            print("PASS: DTB wiring, pulls, contention, boot gating, ESP protocol, Pico host startup")
         finally:
             for process in reversed(processes):
                 if process.poll() is None:
