@@ -241,6 +241,14 @@ int main(int argc, char **argv) {
     rmdir(run_dir);
     return 1;
   }
+  // A virtual board needs no host radio or NetworkManager credentials.
+  // An explicit 0 retains the SDK's real-host Wi-Fi integration for tests.
+  const char *wifi_mode = getenv("MOCK_WIFI_LOOPBACK");
+  if ((!wifi_mode || !*wifi_mode) && setenv("MOCK_WIFI_LOOPBACK", "1", 1) < 0) {
+    perror("setenv MOCK_WIFI_LOOPBACK");
+    rmdir(run_dir);
+    return 1;
+  }
   printf("BOARDSTATE_SOCKET=%s\nMOCK_PTY_DIR=%s\n", sock, run_dir);
   fflush(stdout);
   int result = 1;

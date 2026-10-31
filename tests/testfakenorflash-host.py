@@ -15,7 +15,7 @@ import tty
 
 
 class Host:
-    def __init__(self, binary, output):
+    def __init__(self, binary, output, env_overrides=None):
         if binary.name != "pico_serprog":
             raise ValueError("--binary must be the pico_serprog target in its host build directory")
         self.output = output
@@ -27,6 +27,8 @@ class Host:
             env = {**os.environ, "TMPDIR": str(output),
                    "ASAN_OPTIONS": "abort_on_error=1",
                    "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"}
+            if env_overrides:
+                env.update(env_overrides)
             self.process = subprocess.Popen(
                 [str(binary.parent / "unified_daemon"), str(binary.parent)],
                 env=env, stdout=self.log,

@@ -40,12 +40,12 @@
 // DDRAM row starting positions (16x2)
 #define LCD_DDRAM_ROW_1 0x00
 #define LCD_DDRAM_ROW_2 0x40
+#define LCD_BACKLIGHT_ON 0x08
 
 struct backpack_byte {
   uint8_t rs : 1;
   uint8_t rw : 1;
   uint8_t e : 1;
-  uint8_t backlight : 1;
   uint8_t data : 4;
 };
 
@@ -55,7 +55,7 @@ struct pcf8574t_16x2_lcd_pdata {
 
 static uint8_t backpack_byte_to_uint8(struct backpack_byte *bb) {
   return (bb->rs & 0x01) | ((bb->rw & 0x01) << 1) | ((bb->e & 0x01) << 2) |
-         ((bb->backlight & 0x01) << 3) | ((bb->data & 0x0F) << 4);
+         LCD_BACKLIGHT_ON | ((bb->data & 0x0F) << 4);
 }
 
 static int lcd_send_upper(struct device *i2c_dev, struct backpack_byte *bb,
@@ -65,20 +65,20 @@ static int lcd_send_upper(struct device *i2c_dev, struct backpack_byte *bb,
   bb->e = 0;                     // Enable low
   bb->data = (data >> 4) & 0x0F; // Send upper nibble
   rc = i2c_write_byte(i2c_dev, backpack_byte_to_uint8(bb));
-  if (rc < 0) {
-    return -1;
+  if (rc != 1) {
+    return rc < 0 ? -1 : -EIO;
   }
   dev_dbg(i2c_dev, "Sent upper nibble: en=0 0x%02X", bb->data);
   bb->e = 1; // Enable high
   rc = i2c_write_byte(i2c_dev, backpack_byte_to_uint8(bb));
-  if (rc < 0) {
-    return -1;
+  if (rc != 1) {
+    return rc < 0 ? -1 : -EIO;
   }
   dev_dbg(i2c_dev, "Sent upper nibble: en=1 0x%02X", bb->data);
   bb->e = 0; // Enable low again
   rc = i2c_write_byte(i2c_dev, backpack_byte_to_uint8(bb));
-  if (rc < 0) {
-    return -1;
+  if (rc != 1) {
+    return rc < 0 ? -1 : -EIO;
   }
   dev_dbg(i2c_dev, "Sent upper nibble: en=0 0x%02X", bb->data);
   return 0;
@@ -91,20 +91,20 @@ static int lcd_send_lower(struct device *i2c_dev, struct backpack_byte *bb,
   bb->e = 0;              // Enable high again for low nibble
   bb->data = data & 0x0F; // Send low nibble
   rc = i2c_write_byte(i2c_dev, backpack_byte_to_uint8(bb));
-  if (rc < 0) {
-    return -1;
+  if (rc != 1) {
+    return rc < 0 ? -1 : -EIO;
   }
   dev_dbg(i2c_dev, "Sent low nibble: en=0 0x%02X", bb->data);
   bb->e = 1; // Enable high
   rc = i2c_write_byte(i2c_dev, backpack_byte_to_uint8(bb));
-  if (rc < 0) {
-    return -1;
+  if (rc != 1) {
+    return rc < 0 ? -1 : -EIO;
   }
   dev_dbg(i2c_dev, "Sent low nibble: en=1 0x%02X", bb->data);
   bb->e = 0; // Enable low again
   rc = i2c_write_byte(i2c_dev, backpack_byte_to_uint8(bb));
-  if (rc < 0) {
-    return -1;
+  if (rc != 1) {
+    return rc < 0 ? -1 : -EIO;
   }
   dev_dbg(i2c_dev, "Sent low nibble: en=0 0x%02X", bb->data);
   return 0;
@@ -127,7 +127,7 @@ static int lcd_send_all(struct device *i2c_dev, struct backpack_byte *bb,
 }
 
 static int lcd_send_command(struct device *i2c_dev, uint8_t command) {
-  struct backpack_byte bb;
+  struct backpack_byte bb = {0};
   bb.rs = 0; // Command mode
   bb.rw = 0; // Write mode
   int rc = lcd_send_all(i2c_dev, &bb, command);
@@ -139,7 +139,7 @@ static int lcd_send_command(struct device *i2c_dev, uint8_t command) {
 }
 
 static int lcd_send_data(struct device *i2c_dev, uint8_t data) {
-  struct backpack_byte bb;
+  struct backpack_byte bb = {0};
   bb.rs = 1; // Data mode
   bb.rw = 0; // Write mode
   int rc = lcd_send_all(i2c_dev, &bb, data);
@@ -234,8 +234,10 @@ static int lcd_probe(struct device *dev) {
       find_device_by_prop(dev, "i2c-dev", dev->fdt_node_offset, 0);
   if (!i2c_dev) {
     dev_err(dev, "Failed to find I2C device for LCD");
-    return -ENODEV;
+    return EPROBE_DEFER; /* Optional display must not abort firmware startup. */
   }
+  if (i2c_dev->deferred || !i2c_dev->platform_data)
+    return EPROBE_DEFER;
   struct pcf8574t_16x2_lcd_pdata *pdata = calloc(1, sizeof(*pdata));
   if (!pdata) {
     dev_err(i2c_dev, "Failed to allocate platform data for LCD");
@@ -245,7 +247,8 @@ static int lcd_probe(struct device *dev) {
   int rc = lcd_init(i2c_dev);
   if (rc < 0) {
     dev_err(dev, "Failed to initialize LCD: %d", rc);
-    return rc;
+    free(pdata);
+    return EPROBE_DEFER; /* Optional display: leave serprog usable on NACK. */
   }
   dev->platform_data = pdata;
   lcd_write_string(dev, "LCD Initialized");

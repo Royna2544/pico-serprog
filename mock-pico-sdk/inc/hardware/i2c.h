@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #define I2C0_BASE 0x40044000
 #define I2C1_BASE 0x40048000
 
@@ -84,5 +85,13 @@ static inline int i2c_write_blocking(i2c_inst_t *i2c, uint8_t addr,
                                      bool nostop) {
   printf("i2c_write_blocking called with addr: 0x%02x, len: %zu, nostop: %d\n",
          addr, len, nostop);
-  return 0;
+  const char *trace = addr == 0x3f ? getenv("MOCK_LCD_TRACE") : NULL;
+  if (trace && src && len) {
+    FILE *file = fopen(trace, "ab");
+    if (file) {
+      fwrite(src, 1, len, file);
+      fclose(file);
+    }
+  }
+  return (int)len;
 }

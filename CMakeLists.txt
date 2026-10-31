@@ -49,6 +49,9 @@ set(TINYLINUX_SOURCES
     drivers/pinctrldrv.c
     drivers/usbcdcdrv.c
     drivers/serprog.c
+    drivers/flash_observer.c
+    drivers/flash_telemetry.c
+    drivers/flash_lcd.c
     drivers/latched-switch.c
     drivers/signal-action.c
     drivers/passthru.c
@@ -112,6 +115,11 @@ else()
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
         add_executable(esp-network-test tests/esp-network.cpp)
         target_link_libraries(esp-network-test PRIVATE esp-mock-sdk)
+        add_executable(esp-wifi-loopback-test tests/esp-wifi-loopback.cpp)
+        target_link_libraries(esp-wifi-loopback-test PRIVATE esp-mock-sdk)
+        add_test(NAME esp-wifi-loopback COMMAND esp-wifi-loopback-test)
+        set_tests_properties(esp-wifi-loopback PROPERTIES TIMEOUT 10
+            ENVIRONMENT "MOCK_WIFI_LOOPBACK=1;DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent/mock-system-bus")
         foreach(case support tcp pending peek-fragments ownership pressure udp multicast broadcast descriptors descriptor-zero reset)
             add_test(NAME esp-network-${case} COMMAND esp-network-test ${case})
             set_tests_properties(esp-network-${case} PROPERTIES TIMEOUT 15)
@@ -121,7 +129,7 @@ else()
         set_tests_properties(esp-network-http PROPERTIES TIMEOUT 60)
     endif()
     set_source_files_properties(esp8266/esp8266.ino PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
-    add_executable(esp8266-mock mock-esp8266-sdk/main.cpp esp8266/esp8266.ino)
+    add_executable(esp8266-mock mock-esp8266-sdk/main.cpp esp8266/esp8266.ino esp8266/flash_dashboard.cpp)
     target_link_libraries(esp8266-mock PRIVATE esp-mock-sdk)
     add_executable(vpmic-mock mock-vpmic-sdk/main.cpp)
     target_include_directories(vpmic-mock PRIVATE mock-vpmic-sdk)
@@ -144,6 +152,21 @@ else()
     add_executable(pico_serprog main.c ${TINYLINUX_SOURCES} drivers/fakenorflash.cpp)
     target_link_libraries(pico_serprog PRIVATE pico-mock-sdk fdt boardstate-client)
     add_subdirectory(mock-pico-sdk)
+    if(BUILD_TESTING)
+        add_executable(flash-observer-test tests/test-flash-observer.c
+            drivers/flash_observer.c)
+        target_compile_options(flash-observer-test PRIVATE -fsanitize=address,undefined)
+        target_link_options(flash-observer-test PRIVATE -fsanitize=address,undefined)
+        add_test(NAME flash-observer COMMAND flash-observer-test)
+
+        add_executable(flash-telemetry-test tests/test-flash-telemetry.c
+            drivers/flash_telemetry.c drivers/flash_observer.c)
+        target_link_libraries(flash-telemetry-test PRIVATE pico-mock-sdk)
+        target_compile_options(flash-telemetry-test PRIVATE -fsanitize=address,undefined)
+        target_link_options(flash-telemetry-test PRIVATE -fsanitize=address,undefined)
+        add_test(NAME flash-telemetry COMMAND flash-telemetry-test)
+        set_tests_properties(flash-observer flash-telemetry PROPERTIES TIMEOUT 30)
+    endif()
     target_compile_definitions(pico_serprog PRIVATE MOCK_HARDWARE)
     target_compile_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)
     target_link_options(pico_serprog PRIVATE -fsanitize=undefined,address,leak)

@@ -16,6 +16,9 @@
 #include "drivers/leddrv.h"
 #include "drivers/passthru.h"
 #include "drivers/serprog.h"
+#include "drivers/serprog_defs.h"
+#include "drivers/flash_lcd.h"
+#include "drivers/flash_telemetry.h"
 #include "drivers/wlandrv.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
@@ -35,7 +38,13 @@
 
 #define WLAN_EVENT_LENGTH 128
 #define WLAN_EVENT_DEPTH 64
+#ifdef MOCK_HARDWARE
+#define FLASH_IDLE_TIMEOUT_US 1500000ULL
+#else
+#define FLASH_IDLE_TIMEOUT_US 30000000ULL
+#endif
 static queue_t event_queue;
+static struct flash_telemetry flash_telemetry;
 static unsigned int count;
 static void spi_transfer_callback(const struct device *dev, const uint8_t *send,
                                   uint32_t slen, uint8_t *reply,
@@ -60,8 +69,13 @@ static void spi_transfer_callback(const struct device *dev, const uint8_t *send,
       event[0] = '\0';
     }
   }
+  flash_telemetry_feed(&flash_telemetry, send, slen, reply, rlen, time_us_64());
 }
-void serprog_command_callback(const struct device *dev, uint8_t cmd) {}
+void serprog_command_callback(const struct device *dev, uint8_t cmd) {
+  (void)dev;
+  if (cmd == S_CMD_SYNCNOP)
+    flash_telemetry_begin(&flash_telemetry);
+}
 
 void core1_entry() {
   const char *serprog_dev_alias;
@@ -143,9 +157,31 @@ static int wlantalk_receive(struct wlantalk_io *io,
   return rc < 0 ? (io->error < 0 ? io->error : -EPROTO) : 0;
 }
 
+static int flash_event_format(char *event, size_t size,
+                              const struct flash_sample *sample,
+                              uint32_t sequence) {
+  static const char *const kinds[] = {
+      "ID", "UNSUP", "CE", "SE", "BE32", "BE64", "PP", "RD", "BUSY", "READY", "IDLE"};
+  if (!event || !sample || !sample->session || !sequence ||
+      (unsigned)sample->kind >= sizeof(kinds) / sizeof(kinds[0]))
+    return -EINVAL;
+  int n = snprintf(event, size, "F1,%u,%u,%s,%u,%u,%u,%u,%u,%u",
+                   sample->session, sequence, kinds[sample->kind],
+                   sample->address, sample->length, sample->erase4k,
+                   sample->program256, sample->read256, sample->lost);
+  return n >= 0 && n < (int)size && n < 99 ? 0 : -EOVERFLOW;
+}
+
 static int wlan_talk_loop(struct device *wlan_dev) {
   struct wlantalk_io io = {.dev = wlan_dev};
   struct wlan_talk_message msg;
+  struct flash_lcd lcd_state = {0};
+  uint32_t flash_sequence = 0;
+  uint64_t next_progress_us = 0;
+  uint64_t last_activity_us = 0;
+  struct flash_sample last_sample;
+  bool have_last_sample = false;
+  bool idle_sent = false;
 #define send(command, data) wlantalk_send(&io, command, data)
 #define is(s) (!strcmp(msg.command, s))
 #define data_is(s) (!strcmp(msg.data, s))
@@ -195,7 +231,42 @@ static int wlan_talk_loop(struct device *wlan_dev) {
   pr_info("Slave device Server: %s", msg.data);
   while (1) {
     char event_l[WLAN_EVENT_LENGTH];
-    queue_remove_blocking(&event_queue, event_l);
+    struct flash_sample sample;
+    bool flash_event = !queue_try_remove(&event_queue, event_l);
+    if (flash_event) {
+      bool milestone = flash_telemetry_milestone(&flash_telemetry, &sample);
+      if (!milestone) {
+        uint64_t now_us = time_us_64();
+        if (now_us >= next_progress_us &&
+            flash_telemetry_latest(&flash_telemetry, &sample)) {
+          next_progress_us = now_us + 250000;
+        } else if (have_last_sample && !idle_sent &&
+                   now_us - last_activity_us >= FLASH_IDLE_TIMEOUT_US) {
+          sample = last_sample;
+          sample.kind = FL_IDLE;
+          sample.address = 0;
+          sample.length = 0;
+          idle_sent = true;
+        } else {
+          sleep_ms(20);
+          continue;
+        }
+      }
+      if (sample.kind != FL_IDLE) {
+        last_sample = sample;
+        last_activity_us = time_us_64();
+        have_last_sample = true;
+        idle_sent = false;
+      }
+      if (++flash_sequence == 0)
+        flash_sequence = 1;
+      if (flash_event_format(event_l, sizeof(event_l), &sample,
+                             flash_sequence) < 0) {
+        pr_err("Failed to format flash telemetry");
+        continue;
+      }
+      flash_lcd_present(&lcd_state, &sample, time_us_64());
+    }
     for (int attempt = 1;; attempt++) {
       int result = send("EVT", event_l);
       if (result == 0)
@@ -205,8 +276,14 @@ static int wlan_talk_loop(struct device *wlan_dev) {
       if (result == 0)
         result = -EPROTO;
       pr_err("EVT delivery attempt %d failed: %d", attempt, result);
-      if (attempt == 3)
-        return result;
+      if (attempt == 3) {
+        if (!flash_event)
+          return result;
+        pr_warn("Flash telemetry offline; serprog remains available");
+        sleep_ms(1000);
+        attempt = 0;
+        continue;
+      }
       sleep_ms(100);
     }
     pr_info("Sent event to slave device: %s", event_l);
@@ -250,6 +327,10 @@ int main() {
 
   if (!queue_init(&event_queue, WLAN_EVENT_LENGTH, WLAN_EVENT_DEPTH)) {
     pr_err("Failed to initialize event queue");
+    return EXIT_FAILURE;
+  }
+  if (!flash_telemetry_init(&flash_telemetry)) {
+    pr_err("Failed to initialize flash telemetry");
     return EXIT_FAILURE;
   }
   multicore_launch_core1(core1_entry);

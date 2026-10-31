@@ -40,10 +40,13 @@ class ScriptedESP:
         self.slave_seen = threading.Event()
         self.release_slave = threading.Event()
         self.event_seen = threading.Event()
+        self.flash_event_seen = threading.Event()
         self.reject_first = threading.Event()
         self.release_ack = threading.Event()
         self.stop = threading.Event()
         self.events = []
+        self.flash_events = []
+        self.flash_rejections_remaining = 3
         self.commands = []
         self.failure = None
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -92,6 +95,14 @@ class ScriptedESP:
                     while not self.stop.is_set() and not self.release_slave.wait(.01):
                         pass
                 if command == "EVT":
+                    if data.startswith("F1,"):
+                        self.flash_events.append(data)
+                        self.flash_event_seen.set()
+                        reject = self.flash_rejections_remaining > 0
+                        if reject:
+                            self.flash_rejections_remaining -= 1
+                        self.send("EVT", "BAD" if reject else "OK")
+                        continue
                     self.events.append(data)
                     self.event_seen.set()
                     if len(self.events) == 1:
@@ -113,6 +124,7 @@ class ScriptedESP:
                 self.failure = exc
                 self.slave_seen.set()
                 self.event_seen.set()
+                self.flash_event_seen.set()
 
 
 def wait_event(event, responder, seconds, name):
@@ -187,12 +199,38 @@ def run():
                     assert time.monotonic() < deadline, "next EVT did not follow retry ACK"
                     time.sleep(.02)
                 assert responder.events[2].startswith("JEDEC_ID: EF 40 18 "), responder.events
-                time.sleep(.2)
+                wait_event(responder.flash_event_seen, responder, 5,
+                           "unsupported-chip flash telemetry")
+                sample = responder.flash_events[0].split(",")
+                assert len(sample) == 10 and sample[0] == "F1" and sample[3] == "UNSUP", sample
+                assert int(sample[1]) > 0 and int(sample[2]) > 0, sample
+                assert int(sample[4]) == int("ef4018", 16), sample
+                assert sample[6:9] == ["0", "0", "0"], sample
+                os.write(cdc0, b"\x00")
+                assert read_exact(cdc0, 1, 2) == b"\x06", \
+                    "telemetry rejection blocked serprog CDC0"
+                deadline = time.monotonic() + 8
+                while len(responder.flash_events) < 4:
+                    assert pico.poll() is None, "telemetry retry failure stopped the Pico"
+                    assert responder.failure is None, responder.failure
+                    assert time.monotonic() < deadline, "F1 was not retried after three BAD ACKs"
+                    time.sleep(.02)
+                assert responder.flash_events[:4] == [responder.flash_events[0]] * 4, \
+                    "F1 retry changed its payload or sequence"
+                deadline = time.monotonic() + 4
+                while not any(",IDLE," in data for data in responder.flash_events):
+                    assert pico.poll() is None, "idle telemetry stopped the Pico"
+                    assert responder.failure is None, responder.failure
+                    assert time.monotonic() < deadline, "idle SPI activity was never reported"
+                    time.sleep(.02)
+                time.sleep(1.8)
+                assert sum(",IDLE," in data for data in responder.flash_events) == 1, \
+                    "idle activity was reported repeatedly without another SPI sample"
                 pico.send_signal(signal.SIGINT)  # Flush mock diagnostics on exit.
                 pico.wait(timeout=3)
                 assert (Path(temp) / "pico.log").read_text().count(
-                    "Sent event to slave device") == 2, "EVT ACKs not consumed"
-                print("PASS: early JEDEC events retained and sent in ACK order")
+                    "Sent event to slave device: JEDEC_ID") == 2, "JEDEC ACKs not consumed"
+                print("PASS: early JEDEC events retained and unsupported-chip F1 delivered")
             finally:
                 if responder is not None:
                     responder.stop.set()

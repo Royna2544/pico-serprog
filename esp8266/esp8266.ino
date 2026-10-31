@@ -1,5 +1,7 @@
 
 #include "ESP8266WebServer.h"
+#include "dashboard_page.h"
+#include "flash_dashboard.h"
 #include "wlantalk.h"
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
@@ -9,9 +11,28 @@
 #include <string.h>
 
 static ESP8266WebServer server;
+static FlashDashboard dashboard;
+static bool routes_registered;
+static char uart_input[128];
+static size_t uart_used;
+static bool uart_discarding;
 // This sketch is also compiled unchanged with the real ESP8266 Arduino core.
-// Replace loop() with the application protocol when firmware is ready.
 void setup() {
+  server.stop(); // Mock boot-generation restart must drop the previous listener.
+  dashboard.reset();
+  uart_used = 0;
+  uart_discarding = false;
+  if (!routes_registered) {
+    server.onNotFound(
+        []() { server.send(404, "text/plain", "Not found"); });
+    server.on("/ping", HTTP_GET, []() {
+      server.send(200, "text/plain", "Hello from ESP8266!");
+    });
+    server.on("/", HTTP_GET, []() {
+      server.send_P(200, "text/html; charset=utf-8", dashboard_page);
+    });
+    routes_registered = true; // SRVIT/reboots must not grow handler lists.
+  }
   Serial.begin(74880);
   pinMode(15, OUTPUT);
   digitalWrite(15, HIGH);
@@ -35,36 +56,32 @@ static void wlantalk_putc_func(void *privdata, int c) {
 }
 
 void loop() {
-  // Keep partial UART frames across loop() calls. The parser can then consume
-  // a complete frame without relying on Serial.read() to block.
-  static char input[128];
-  static size_t used;
-  static bool discarding;
-
+  // Keep partial UART frames across loop() calls, but reset them in setup().
   server.handleClient();
-  while (Serial.available()) {
+  dashboard.pump();
+  for (size_t budget = 0; budget < 128 && Serial.available(); ++budget) {
     int c = Serial.read();
     if (c < 0)
       break;
-    if (discarding) {
+    if (uart_discarding) {
       if (c == '\n')
-        discarding = false;
+        uart_discarding = false;
       continue;
     }
-    if (!used && c != ':')
+    if (!uart_used && c != ':')
       continue;
-    if (used == sizeof(input)) {
-      used = 0;
-      discarding = c != '\n';
+    if (uart_used == sizeof(uart_input)) {
+      uart_used = 0;
+      uart_discarding = c != '\n';
       continue;
     }
-    input[used++] = (char)c;
+    uart_input[uart_used++] = (char)c;
     if (c != '\n')
       continue;
 
-    struct wlantalk_frame frame = {input, used, 0};
+    struct wlantalk_frame frame = {uart_input, uart_used, 0};
     struct wlan_talk_message msg;
-    used = 0;
+    uart_used = 0;
     if (parse_wlan_talk_message(wlantalk_getc_func, &frame, &msg) == 0 &&
         frame.position == frame.size) {
 #define send_response(command, data)                                           \
@@ -176,19 +193,26 @@ void loop() {
         bool ok = contents == "Hello from ESP8266!";
         send_response("SDTEST", ok ? "PASS" : "Fail, content mismatch");
       } else if (is("SRVIT")) {
-        int port = atoi(msg.data);
-        server.onNotFound(
-            []() { server.send(404, "text/plain", "Not found"); });
-        server.on("/ping", HTTP_GET, []() {
-          server.send(200, "text/plain", "Hello from ESP8266!");
-        });
-        server.begin(port);
+        char *end = NULL;
+        unsigned long port = strtoul(msg.data, &end, 10);
+        if (!msg.data_len || end == msg.data || *end || port < 1024 ||
+            port > 65534 || !dashboard.begin(static_cast<uint16_t>(port))) {
+          send_response("SRVIT", "ERROR");
+          continue;
+        }
+        server.stop();
+        server.begin(static_cast<uint16_t>(port));
         send_response("SRVIT", "OK");
       } else if (is("SRVSP")) {
         server.stop();
+        dashboard.stop();
         send_response("SRVSP", "OK");
       } else if (is("EVT")) {
-        send_response("EVT", "OK");
+        // Legacy JEDEC events remain ACK-only. F1 and future F versions must
+        // validate before ACK, and the network pump runs only after this reply.
+        bool valid = msg.data[0] != 'F' ||
+                     dashboard.receive(msg.data, msg.data_len);
+        send_response("EVT", valid ? "OK" : "BAD");
       } else {
         send_response("ERROR", "Unknown command");
       }

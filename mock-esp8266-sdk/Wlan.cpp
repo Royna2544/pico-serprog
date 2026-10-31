@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -24,6 +25,11 @@ constexpr uint8_t kEncNone = 7;
 constexpr uint8_t kEncAuto = 8;
 constexpr gint64 kScanTimeoutUs = 20 * G_USEC_PER_SEC;
 constexpr gint64 kApTimeoutUs = 20 * G_USEC_PER_SEC;
+
+bool loopback_wifi() {
+  const char *value = std::getenv("MOCK_WIFI_LOOPBACK");
+  return value && std::strcmp(value, "1") == 0;
+}
 
 struct Network {
   std::string ssid;
@@ -638,6 +644,14 @@ bool valid_address_tuple(IPAddress ip, IPAddress subnet) {
 ESP8266WiFiClass WiFi;
 
 bool ESP8266WiFiClass::mode(WiFiMode_t newMode) {
+  if (loopback_wifi()) {
+    if (newMode != WIFI_OFF && newMode != WIFI_STA)
+      return false;
+    _mode = newMode;
+    if (newMode == WIFI_OFF)
+      st().staStatus = WL_DISCONNECTED;
+    return true;
+  }
   service();
   if (newMode == WIFI_AP_STA)
     return false; // A single NetworkManager device isn't a dual-mode radio.
@@ -706,6 +720,15 @@ wl_status_t ESP8266WiFiClass::begin(const char *ssid, const char *passphrase,
   if (!valid_ssid(ssid) || !valid_psk(passphrase) || channel < 0 ||
       channel > 14)
     return WL_CONNECT_FAILED;
+  if (loopback_wifi()) {
+    if (_mode != WIFI_STA && !mode(WIFI_STA))
+      return WL_NO_SHIELD;
+    State &s = st();
+    s.ssid = "host-loopback";
+    s.passphrase.clear();
+    s.staStatus = connect ? WL_CONNECTED : WL_DISCONNECTED;
+    return s.staStatus;
+  }
   if (_mode != WIFI_STA && !mode(WIFI_STA))
     return WL_NO_SHIELD;
   if (!ensure_device() || !radio_available())
@@ -824,6 +847,14 @@ bool ESP8266WiFiClass::disconnect(bool wifioff) {
 }
 
 bool ESP8266WiFiClass::disconnect(bool wifioff, bool eraseCredentials) {
+  if (loopback_wifi()) {
+    st().staStatus = WL_DISCONNECTED;
+    if (eraseCredentials)
+      st().ssid.clear();
+    if (wifioff)
+      _mode = WIFI_OFF;
+    return true;
+  }
   service();
   State &s = st();
   ++s.stationEpoch;
@@ -852,6 +883,8 @@ bool ESP8266WiFiClass::reconnect() { return begin() == WL_IDLE_STATUS; }
 bool ESP8266WiFiClass::isConnected() { return status() == WL_CONNECTED; }
 
 wl_status_t ESP8266WiFiClass::status() {
+  if (loopback_wifi())
+    return _mode == WIFI_STA ? st().staStatus : WL_DISCONNECTED;
   service();
   State &s = st();
   if (!ensure_device())
@@ -872,6 +905,8 @@ wl_status_t ESP8266WiFiClass::status() {
 }
 
 String ESP8266WiFiClass::SSID() const {
+  if (loopback_wifi())
+    return as_arduino(st().ssid);
   service();
   const State &s = st();
   if (ensure_device() && s.device &&
@@ -886,6 +921,8 @@ String ESP8266WiFiClass::SSID() const {
 String ESP8266WiFiClass::psk() const { return as_arduino(st().passphrase); }
 
 int8_t ESP8266WiFiClass::RSSI() {
+  if (loopback_wifi())
+    return st().staStatus == WL_CONNECTED ? -50 : 0;
   service();
   if (!ensure_device())
     return 0;
@@ -896,6 +933,8 @@ int8_t ESP8266WiFiClass::RSSI() {
 }
 
 IPAddress ESP8266WiFiClass::localIP() {
+  if (loopback_wifi())
+    return status() == WL_CONNECTED ? IPAddress(127, 0, 0, 1) : IPAddress();
   service();
   if (status() != WL_CONNECTED)
     return IPAddress();
@@ -935,6 +974,8 @@ IPAddress ESP8266WiFiClass::dnsIP(uint8_t dns_no) {
 }
 
 String ESP8266WiFiClass::macAddress() {
+  if (loopback_wifi())
+    return String("02:00:00:00:00:01");
   service();
   if (!ensure_device())
     return String("");
@@ -1081,6 +1122,8 @@ String ESP8266WiFiClass::softAPSSID() const { return as_arduino(st().apSsid); }
 
 int8_t ESP8266WiFiClass::scanNetworks(bool async, bool show_hidden,
                                       uint8_t channel, uint8_t *ssid) {
+  if (loopback_wifi())
+    return 0;
   service();
   if (st().scanRunning)
     return WIFI_SCAN_RUNNING;

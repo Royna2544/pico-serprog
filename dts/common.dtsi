@@ -16,6 +16,7 @@
         serprog0 = &serprog0;
         passthru0 = &passthru0;
         led0 = &led0;
+        display0 = &display0;
         pwrok0 = &pwrok0;
         switch0 = &switch0;
     };

@@ -103,6 +103,49 @@ the supervisor cannot remove its private links after an uncatchable SIGKILL.
 `uart> pico->esp [xx]` / `uart> esp->pico [xx]` diagnostics. A TX accepted
 while the ESP is off or RX is unmuxed is labeled discarded/not received.
 
+### Host flash activity dashboard
+
+In NORMAL ESP mode the sketch serves a read-only page at
+`http://127.0.0.1:8000/` in the host emulator (use the ESP's IP address
+instead of loopback on an actual network). The live Server-Sent Events stream
+uses port 8001 (`/events`); `SRVIT` chooses the HTTP port and its successor for
+SSE. The ESP receives events over Pico UART1, not a second connection to the
+flashrom-owned serprog CDC0 port. The `/ping` endpoint remains available while
+a browser holds an SSE connection. No HTTP route can erase or program a chip.
+`unified_daemon` defaults `MOCK_WIFI_LOOPBACK=1` for its children, so this
+emulator does not connect, scan, or change the host's NetworkManager Wi-Fi.
+An explicit `MOCK_WIFI_LOOPBACK=0` opts back into the SDK's host-radio model;
+that mode is outside these dashboard tests. The loopback mock uses an invented
+MAC and SSID rather than storing credentials passed in the sketch's request.
+
+An `F1` event carries a session, sequence, observed SPI opcode category,
+address, transfer length, distinct 4 KiB erase-sector count, distinct 256-byte
+program/read-page counts, and a lost-milestone count. The only supported profile
+is the shared `C2 20 17` ID of MX25L6406E/MX25L6408E (8 MiB); the emulator's
+default NOR models Winbond `EF 40 18`, so it shows an unsupported-chip ID and
+does **not** present Macronix percentages. These bars describe addressed
+coverage, not flashrom's `--progress`, a successful physical erase/write, a
+verified image, or the flashrom process's exit status. Reads may be pre-read or
+verification; the Pico cannot tell. The 16x2 LCD shows a similarly brief
+observational status when its driver is available; display errors must not
+stop serprog or UART events. After 30 seconds without a new SPI sample (1.5
+seconds in the host emulator), one `IDLE` event updates both displays; this
+does not mean flashrom has finished or verified anything.
+
+For emulator-only checks (no real programmer or flash device):
+
+    python tests/test-flash-dashboard-esp.py
+    python tests/test-flash-dashboard-host.py
+    python tests/test-flash-lcd-host.py
+    python tests/test-jedec-evt-host.py
+    python tests/test-mock-i2c-trace.py
+    ctest --test-dir build-host -R '^esp-wifi-loopback$' --output-on-failure
+
+The host flashrom fixture probes its in-memory Winbond NOR with `--flash-name`;
+it does not issue a physical erase or write. Do not expose the unauthenticated
+read-only status page on an untrusted network. Host tests and the Pico I2C mock
+cannot certify real Wi-Fi, LCD electronics, flash timing, or electrical wiring.
+
 For daemon-only experiments, start `build-host/boardstate-daemon` with the
 compiled DTB and a private socket path, then set `BOARDSTATE_SOCKET` for
 `boardstate-daemon/ctl.py` and clients. The Pico firmware now autoboots the
@@ -116,7 +159,7 @@ To build for the physical ESP8266 with an installed ESP8266 Arduino core:
 
 This does **not** link the host shim. The core/CLI must already be installed;
 the host test alone cannot certify a physical firmware build or electrical
-behavior. No flash storage, ROM command interpreter or Wi-Fi is emulated; UART queues are bounded
+behavior. No flash storage, ROM command interpreter or RF Wi-Fi is emulated; UART queues are bounded
 at 4096 bytes and ignore baud timing. `GPIO GET` reports physical levels,
 returns `ERR contention` for opposing outputs, and models floating as low.
 On the transition where EN and reset become high, the daemon samples
